@@ -88,22 +88,7 @@ class SettingsWidget(QWidget):
             }
         """)
         logs_layout.addWidget(self.logs_text)
-        
-        # Кнопки управления логами
-        log_buttons_layout = QHBoxLayout()
-        self.refresh_logs_btn = QPushButton("🔄 Обновить логи")
-        self.refresh_logs_btn.clicked.connect(self.update_logs_display)
-        self.clear_logs_btn = QPushButton("🗑️ Очистить логи")
-        self.clear_logs_btn.clicked.connect(self.clear_logs)
-        
-        log_buttons_layout.addWidget(self.refresh_logs_btn)
-        log_buttons_layout.addWidget(self.clear_logs_btn)
-        log_buttons_layout.addStretch()
-        
-        logs_layout.addLayout(log_buttons_layout)
-        logs_group.setLayout(logs_layout)
-        
-        tab2_layout.addWidget(logs_group)
+
         
         # Вкладка 3: Редактирование конфигурации
         tab3 = QWidget()
@@ -227,27 +212,7 @@ class SettingsWidget(QWidget):
     def get_selected_protocol(self):
         """Получить выбранный протокол"""
         return self.protocol_combo.currentText()
-    
-    def update_logs_display(self):
-        """Обновить отображение логов подключений"""
-        try:
-            from communication.connection_logger import get_connection_logger
-            logger = get_connection_logger()
-            logs_content = logger.read_recent_logs(100)
-            self.logs_text.setText(logs_content)
-        except Exception as e:
-            self.logs_text.setText(f"Ошибка при загрузке логов: {e}")
-    
-    def clear_logs(self):
-        """Очистить логи"""
-        try:
-            from communication.connection_logger import get_connection_logger
-            logger = get_connection_logger()
-            logger.clear_logs()
-            self.update_logs_display()
-        except Exception as e:
-            self.logs_text.setText(f"Ошибка при очистке логов: {e}")
-    
+   
     def save_configuration(self):
         """Сохранить конфигурацию в файл"""
         try:
