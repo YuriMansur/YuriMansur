@@ -1,0 +1,76 @@
+import struct
+from typing import List
+
+class ConvertProtocolData:
+
+    @staticmethod
+    def float_to_words(value: float, endianess: str) -> List[int]:
+        endianess = endianess.upper()
+        match endianess:
+            case "ABCD":
+                fmt = ">f" 
+                byteorder1 = 'big' 
+                byteorder2 = 'big' 
+            case "DCBA":
+                fmt = "<f" 
+                byteorder1 = 'big' 
+                byteorder2 = 'big' 
+            case "BADC":
+                fmt = ">f"  
+                byteorder1 = 'little' 
+                byteorder2 = 'little' 
+            case "CDAB":
+                fmt = "<f"  
+                byteorder1 = 'little'
+                byteorder2 = 'little'
+            case _: 
+                fmt = "=f"  
+                byteorder1 = 'little' 
+                byteorder2 = 'little' 
+
+        packed = struct.pack(fmt, value)
+        words = [ 
+            int.from_bytes(packed[0:2], byteorder1),
+            int.from_bytes(packed[2:4], byteorder2)
+        ]
+        print( words)
+        return words
+
+    @staticmethod
+    def words_to_float(words: List[int], endianess: str) -> float:
+        endianess = endianess.upper()
+        match endianess:
+            case "ABCD":
+                fmt = ">f" 
+                byteorder1 = 'big' 
+                byteorder2 = 'big' 
+            case "DCBA":
+                fmt = "<f" 
+                byteorder1 = 'big' 
+                byteorder2 = 'big' 
+            case "BADC":
+                fmt = ">f"  
+                byteorder1 = 'little' 
+                byteorder2 = 'little' 
+            case "CDAB":
+                fmt = "<f"  
+                byteorder1 = 'little'
+                byteorder2 = 'little'
+            case _: #(СDAB)
+                fmt = "=f"  
+                byteorder1 = 'little' 
+                byteorder2 = 'little' 
+   
+        packed = words[0].to_bytes(2, byteorder1) + words[1].to_bytes(2, byteorder2)
+        print( packed)
+        unpacked = struct.unpack(fmt, packed)[0]
+        print( unpacked)
+        return unpacked 
+
+
+
+res = ConvertProtocolData.float_to_words(3.14, "BADC")
+ConvertProtocolData.words_to_float(res, "BADC")
+
+
+     

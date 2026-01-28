@@ -69,26 +69,7 @@ class SettingsWidget(QWidget):
         # Вкладка 2: Логи подключений
         tab2 = QWidget()
         tab2_layout = QVBoxLayout(tab2)
-        
-        logs_group = QGroupBox("Логи подключений")
-        logs_layout = QVBoxLayout()
-        
-        # Текстовое поле для отображения логов
-        self.logs_text = QTextEdit()
-        self.logs_text.setReadOnly(True)
-        self.logs_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #00ff00;
-                border: 1px solid #bdc3c7;
-                border-radius: 5px;
-                padding: 10px;
-                font-family: 'Courier New', monospace;
-                font-size: 9px;
-            }
-        """)
-        logs_layout.addWidget(self.logs_text)
-
+        tab2_layout.addStretch()
         
         # Вкладка 3: Редактирование конфигурации
         tab3 = QWidget()
@@ -302,87 +283,6 @@ class SettingsWidget(QWidget):
         if config_data is None or not isinstance(config_data, dict):
             config_data = self.get_default_config()
         
-        # Форматируем конфигурацию для отображения
-        protocol = self.get_selected_protocol()
+  
         
-        config_text = f"""
-════════════════════════════════════════════════════════════════════════════════
-                        ТЕКУЩАЯ КОНФИГУРАЦИЯ
-════════════════════════════════════════════════════════════════════════════════
 
-ВЫБРАННЫЙ ПРОТОКОЛ: {protocol}
-
-"""
-        
-        if protocol == "Modbus TCP":
-            modbus_config = config_data.get("modbus_tcp", {})
-            config_text += f"""ПАРАМЕТРЫ MODBUS TCP:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  • Host:           {modbus_config.get('host', 'N/A')}
-  • Port:           {modbus_config.get('port', 'N/A')}
-  • Unit ID:        {modbus_config.get('unit_id', 'N/A')}
-  • Timeout:        {modbus_config.get('timeout', 'N/A')} сек
-  • Retries:        {modbus_config.get('retries', 'N/A')}
-  • Статус:         {'✓ Включен' if modbus_config.get('enabled', False) else '✗ Отключен'}
-"""
-        
-        elif protocol == "OPC UA":
-            opcua_config = config_data.get("opcua", {})
-            config_text += f"""ПАРАМЕТРЫ OPC UA:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  • Endpoint URL:   {opcua_config.get('endpoint_url', 'N/A')}
-  • Security:       {opcua_config.get('security_policy', 'N/A')}
-  • Timeout:        {opcua_config.get('timeout', 'N/A')} сек
-  • Retries:        {opcua_config.get('retries', 'N/A')}
-  • Username:       {opcua_config.get('username', 'Anonymous')}
-  • Статус:         {'✓ Включен' if opcua_config.get('enabled', False) else '✗ Отключен'}
-"""
-        
-        # Добавляем информацию о переподключении
-        reconnect_config = config_data.get("reconnection", {})
-        config_text += f"""
-ПЕРЕПОДКЛЮЧЕНИЕ:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  • Автоматическое: {'✓ Да' if reconnect_config.get('auto_reconnect', False) else '✗ Нет'}
-  • Интервал:       {reconnect_config.get('reconnect_interval', 'N/A')} сек
-  • Макс попыток:   {reconnect_config.get('max_reconnect_attempts', 'N/A')}
-
-════════════════════════════════════════════════════════════════════════════════
-"""
-        
-        self.config_text.setText(config_text)
-    
-    def get_default_config(self) -> dict:
-        """Получить конфигурацию по умолчанию"""
-        return {
-            "modbus_tcp": {
-                "host": "127.0.0.1",
-                "port": 502,
-                "timeout": 5,
-                "retries": 3,
-                "unit_id": 1,
-                "enabled": True
-            },
-            "opcua": {
-                "endpoint_url": "opc.tcp://127.0.0.1:4840",
-                "security_policy": "None",
-                "timeout": 5,
-                "retries": 3,
-                "username": "Anonymous",
-                "enabled": False
-            },
-            "reconnection": {
-                "auto_reconnect": True,
-                "reconnect_interval": 5,
-                "max_reconnect_attempts": 10
-            }
-        }
-    
-    def set_config(self, config_data: dict):
-        """
-        Установить конфигурацию для отображения
-        
-        Args:
-            config_data: Словарь с конфигурацией
-        """
-        self.update_config_display(config_data)

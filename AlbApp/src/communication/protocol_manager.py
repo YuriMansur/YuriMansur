@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Optional, Dict, Any
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
 from PyQt6.QtWidgets import QMessageBox
-from communication.protocols.modbus_tcp import ModbusTcpClient, ModbusConfig
+from communication.protocols.modbus.modbus_tcp import ModbusTcpClient, ModbusConfig
 from communication.protocols.opc_ua import OpcUaClientQt, OpcUaConfig
 
 logger = logging.getLogger(__name__)

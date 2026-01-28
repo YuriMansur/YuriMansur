@@ -1,24 +1,13 @@
-from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QStackedWidget, QGridLayout,
-    QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
-    QFrame, QComboBox)
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
-
-# Импорт из существующей папки wigets
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QStackedWidget, QVBoxLayout, QHBoxLayout)
 from wigets.trends_wiget import PyQtGraphWidget  
 from wigets.settings_wiget import SettingsWidget
 from wigets.experiment_wiget import ExperimentWidget 
-
-# Импорт нового класса NavigationButton
-from gui_style_classes.nav_button import NavigationButton
-
+from wigets.gui_style_classes.nav_button import NavigationButton
 
 class MainWindow(QMainWindow):
     def __init__(self):              
         super().__init__()
 # Настройка главного экрана
-############################################################
         # Настройка окна                      
         self.setWindowTitle("AlbApp")                       
         self.current_page = 0                
@@ -46,7 +35,7 @@ class MainWindow(QMainWindow):
         # StackedWidget для страниц   
         self.stacked_widget = QStackedWidget()          
 
-        # Создание страниц с подсветкой
+        # Создание страниц
         self.create_pages()                  
 
         # Добавление "stacked widget" в лэйаут контента
@@ -58,9 +47,6 @@ class MainWindow(QMainWindow):
         # Устанавливаем первую страницу активной
         self.switch_page(0)
         
-        # Инициализация конфигурации в "settings" виджете
-        self.settings_widget.init_from_config()
-
     #Создание верхней панели навигации
     def create_top_navigation(self):
         self.top_nav_panel = QWidget()
@@ -118,11 +104,6 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(page2)  
         self.stacked_widget.addWidget(page3)
 
-        # Сохраняем ссылки на виджеты страниц
-        self.experiment_widget = page1
-        self.trends_widget = page2
-        self.settings_widget = page3
-
     # Переключение страниц
     def switch_page(self, index):
         self.current_page = index
@@ -130,4 +111,3 @@ class MainWindow(QMainWindow):
         # Обновление состояния кнопок навигации
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
-      
