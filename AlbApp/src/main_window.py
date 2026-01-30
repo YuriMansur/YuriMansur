@@ -4,6 +4,7 @@ from wigets.settings_wiget import SettingsWidget
 from wigets.experiment_wiget import ExperimentWidget 
 from wigets.gui_style_classes.nav_button import NavigationButton
 
+
 class MainWindow(QMainWindow):
     def __init__(self):              
         super().__init__()
@@ -96,7 +97,7 @@ class MainWindow(QMainWindow):
         page2.setObjectName("trends_page")
         
         # Страница 3: Настройки
-        page3 = SettingsWidget()
+        page3 = ModbusGUIWidget()
         page3.setObjectName("settings_page")
     
         # Добавляем страницы

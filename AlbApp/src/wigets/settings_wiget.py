@@ -161,7 +161,7 @@ class SettingsWidget(QWidget):
     def init_from_config(self):
         """Инициализировать поля из конфигурации (вызывается из MainWindow)"""
         try:
-            from communication.protocol_manager import get_protocol_manager
+            from communication.control.comm_manager import get_protocol_manager
             
             # Получаем менеджер протоколов
             protocol_manager = get_protocol_manager()
@@ -197,7 +197,7 @@ class SettingsWidget(QWidget):
     def save_configuration(self):
         """Сохранить конфигурацию в файл"""
         try:
-            from communication.protocol_manager import get_protocol_manager
+            from communication.control.comm_manager import get_protocol_manager
             
             # Получаем конфигурацию из полей ввода
             config_data = {
@@ -237,7 +237,7 @@ class SettingsWidget(QWidget):
     def reload_configuration(self):
         """Загрузить конфигурацию из файла"""
         try:
-            from communication.protocol_manager import get_protocol_manager
+            from communication.control.comm_manager import get_protocol_manager
             
             # Получаем или создаём менеджер протоколов
             protocol_manager = get_protocol_manager()

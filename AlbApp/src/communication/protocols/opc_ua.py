@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Union
 from dataclasses import dataclass
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QThread
 import async_timeout
 from asyncua import Client as OpcUaClient
 from asyncua.ua import NodeId, Variant, VariantType
