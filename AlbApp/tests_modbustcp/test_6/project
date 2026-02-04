@@ -1,0 +1,7 @@
+project/
+│
+├── main.py              # точка входа (Qt + asyncio)
+├── gui.py               # Qt интерфейс
+├── plc_manager.py       # менеджер PLC
+├── plc_worker.py        # worker одного PLC
+└── requirements.txt

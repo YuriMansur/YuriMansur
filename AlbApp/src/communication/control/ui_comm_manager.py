@@ -1,64 +1,55 @@
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel,
-    QLineEdit, QPushButton, QHBoxLayout)
-from PyQt6.QtCore import QObject, pyqtSignal as Signal
-
-from PyQt6.QtWidgets import QApplication
 import sys
-from liveipcontroller import LiveIpController
-class ModbusGUIWidget(QWidget):
-    """
-    Виджет для QStackedWidget.
-    Не запускает QApplication и может использоваться как страница.
-    """
+from PyQt6.QtWidgets import QWidget, QLineEdit, QHBoxLayout, QApplication
+from PyQt6.QtCore import Qt
+from line_qt_str import IPBuilder  # твой класс IPBuilder
+
+
+class IPWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-    
 
+        # Логика IP
+        self.ip = IPBuilder()
 
-        layout = QVBoxLayout()
-        self.config = None
-        # IP и Port
-        self.ip_input = QLineEdit()
-        self.ip_controller = LiveIpController(self.ip_input, self.config)
+        # QLineEdit только для отображения
+        self.edit = QLineEdit()
+        self.edit.setReadOnly(True)
+        self.edit.setMaxLength(15)
+        self.edit.setPlaceholderText("0.0.0.0")
+        self.edit.setText(self.ip.get_ip())
 
-        self.port_input = QLineEdit("502")
-        layout.addWidget(QLabel("IP:"))
-        layout.addWidget(self.ip_input)
-        layout.addWidget(QLabel("Port:"))
-        layout.addWidget(self.port_input)
+        
+        # Layout
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.edit)
 
-        # Start и Count
-        h_layout = QHBoxLayout()
-        self.start_input = QLineEdit("0")
-        self.count_input = QLineEdit("10")
-        h_layout.addWidget(QLabel("Start Address:"))
-        h_layout.addWidget(self.start_input)
-        h_layout.addWidget(QLabel("Count:"))
-        h_layout.addWidget(self.count_input)
-        layout.addLayout(h_layout)
+        self.setFocusProxy(self.edit)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # Статус подключения
-        self.status_label = QLabel("Disconnected")
-        layout.addWidget(self.status_label)
+    def keyPressEvent(self, event):
+        """
+        Перехватываем ввод клавиш и обновляем IPBuilder.
+        """
+        key = event.key()
+        char = event.text()
 
-        # Кнопки
-        self.connect_btn = QPushButton("Connect")
-        self.read_btn = QPushButton("Read Registers")
-        layout.addWidget(self.connect_btn)
-        layout.addWidget(self.read_btn)
+        # Пока блокируем Backspace
+        if key == Qt.Key.Key_Backspace:
+            return
 
-        # Метка для данных
-        self.data_label = QLabel("Data: []")
-        layout.addWidget(self.data_label)
-
-        self.setLayout(layout)
-
+        # Разрешаем только цифры
+        if char.isdigit():
+            if self.ip.add_char(char):
+                self.edit.setText(self.ip.get_ip())
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    gui = ModbusGUIWidget()
-    gui.show()
+
+    w = IPWidget()
+    w.setWindowTitle("IP Input Widget")
+    w.resize(200, 40)
+    w.show()
 
     sys.exit(app.exec())

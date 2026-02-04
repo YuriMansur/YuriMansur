@@ -1,5 +1,6 @@
 {
     "python.analysis.extraPaths": [
-        "./src/wigets"
+        "./src/wigets",
+        "./src/gui/windows/settings_window/tab_wigets"
     ]
 }

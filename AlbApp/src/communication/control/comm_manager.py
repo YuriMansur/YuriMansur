@@ -1,48 +1,39 @@
-import os
-import json
+# protocol_manager.py
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
-# from protocols.modbus.modbus_tcp import ModbusPoller
+from modbus_tcp import AsyncModbusPoller
 from other_classes.config_manager import ConfigManager
 
-class ProtocolManager(QObject): 
-    def __init__(self):
-        super().__init__()
+class ProtocolManager(QObject):
+    data_received = pyqtSignal(str, dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.config = ConfigManager()
+        self.pollers = {}
 
+    def create_pollers(self):
+        cfg = self.config.load("poller_config.json")
+        devices = cfg.get("devices", {})
 
+        for device_id, device_cfg in devices.items():
+            poller = AsyncModbusPoller(device_id, device_cfg)
+            thread = QThread()
 
+            poller.moveToThread(thread)
 
-    
-    def create_poller(self):
-        # self.poller = ModbusPoller()        # Создаём объект poller
-        self.poller_thread = QThread()      # Создаём поток
+            thread.started.connect(poller.start)
+            poller.data_received.connect(self.data_received)
 
-        # Переносим poller в отдельный поток
-        self.poller.moveToThread(self.poller_thread)
+            thread.finished.connect(poller.deleteLater)
+            thread.finished.connect(thread.deleteLater)
 
-        # Корректное удаление при завершении потока
-        self.poller_thread.finished.connect(self.poller.deleteLater)
-        self.poller_thread.finished.connect(self.poller_thread.deleteLater)
+            thread.start()
+            self.pollers[device_id] = (poller, thread)
 
-        # Проброс сигналов poller в GUI
-        self.poller.data_received.connect(self.on_data)
-        self.poller.connection_status.connect(self.on_connection)
+    def destroy_all(self):
+        for poller, thread in self.pollers.values():
+            poller.shutdown()
+            thread.quit()
+            thread.wait()
 
-        # Стартуем потокщ
-        self.poller_thread.start()
-
-
-    def destroy_poller(self):
-        if hasattr(self, "poller") and self.poller:
-            self.poller.shutdown()      # Останавливаем таймер и закрываем Modbus
-            self.poller_thread.quit()   # Сигнал потоку о завершении
-            self.poller_thread.wait()   # Ждём завершения потока
-            self.poller = None
-            self.poller_thread = None
-            
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    manager = ProtocolManager()
-    window = UiApp()
-    window.showMaximized()
-    sys.exit(app.exec())
+        self.pollers.clear()
