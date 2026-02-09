@@ -4,7 +4,7 @@ import asyncio
 from PyQt6.QtWidgets import QApplication
 from qasync import QEventLoop
 
-from modbus_manager import PLCManager
+from protocol_manager import ProtocolManager
 from gui import MainWindow
 
 # Сбор
@@ -21,7 +21,7 @@ def main():
     asyncio.set_event_loop(loop)
 
     # 4. Создать синхронные объекты:
-    manager = PLCManager()
+    manager = ProtocolManager()
     window = MainWindow(manager)
     window.show()
 
