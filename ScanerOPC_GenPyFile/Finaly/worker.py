@@ -1,5 +1,6 @@
+import asyncio
 from PyQt6.QtCore import QThread, pyqtSignal
-from opcua import Client, ua
+from asyncua import Client, ua
 
 DATA_TYPE_MAP = {
     ua.NodeId(ua.ObjectIds.Boolean): "Boolean",
@@ -14,8 +15,9 @@ DATA_TYPE_MAP = {
     ua.NodeId(ua.ObjectIds.Float): "Float",
     ua.NodeId(ua.ObjectIds.Double): "Double",
     ua.NodeId(ua.ObjectIds.String): "String",
-    ua.NodeId(ua.ObjectIds.Enumeration): "Enumeration"
+    ua.NodeId(ua.ObjectIds.Enumeration): "Enumeration",
 }
+
 
 class ScanWorker(QThread):
     log = pyqtSignal(str)
@@ -27,82 +29,136 @@ class ScanWorker(QThread):
         super().__init__()
         self.endpoint = endpoint
         self.scanned_nodes = 0
-        self.total_nodes = 0
+        self.skipped_nodes = 0
+        self._stop = False
+        self._loop = None
+
+    def stop(self):
+        self._stop = True
+
+    # ── QThread entry point ──────────────────────────────────────────────────
 
     def run(self):
+        self._loop = asyncio.new_event_loop()
+        self._loop.set_exception_handler(lambda loop, ctx: None)  # suppress background task tracebacks
+        asyncio.set_event_loop(self._loop)
         try:
-            endpoint = self.endpoint.strip()
-            if not endpoint.startswith("opc.tcp://"):
-                endpoint = "opc.tcp://" + endpoint
-
-            client = Client(endpoint)
-            client.connect()
-            self.log.emit(f"🔗 Connected to {endpoint}")
-
-            root = client.get_root_node()
-            self.total_nodes = self._count_nodes(root)
-            self.log.emit(f"ℹ Total nodes to scan: {self.total_nodes}")
-
-            result = self._walk(root)
-            client.disconnect()
-            self.finished.emit(result)
-            self.log.emit("✅ Scan finished")
+            self._loop.run_until_complete(self._async_run())
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(f"{type(e).__name__}: {e}")
+        finally:
+            pending = asyncio.all_tasks(self._loop)
+            if pending:
+                for t in pending:
+                    t.cancel()
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            self._loop.close()
+            self._loop = None
 
-    def _count_nodes(self, node):
+    # ── Main async coroutine ─────────────────────────────────────────────────
+
+    async def _async_run(self):
+        endpoint = self.endpoint.strip()
+        if not endpoint.startswith("opc.tcp://"):
+            endpoint = "opc.tcp://" + endpoint
+
+        scan_ok = False
         try:
-            children = node.get_children()
-        except Exception:
-            return 1
-        count = 1
-        for ch in children:
-            count += self._count_nodes(ch)
-        return count
+            client = Client(url=endpoint, timeout=10)
+            client.session_timeout = 3600000
+            async with client:
+                self.log.emit(f"🔗 Connected to {endpoint}")
 
-    def _walk(self, node):
-        node_dict = {}
-        try:
-            name = node.get_browse_name().Name
-            nodeid = node.nodeid.to_string()  # ← КОРРЕКТНЫЙ NodeId
-            cls = node.get_node_class().name
+                root = client.get_root_node()
+                self.log.emit("🔍 Starting tree scan...")
 
-            node_dict["browse_name"] = name
-            node_dict["node_id"] = nodeid
-            node_dict["node_class"] = cls
-            node_dict["children"] = {}
+                self._semaphore = asyncio.Semaphore(2)
+                result = await self._walk(root)
+
+                if self._stop:
+                    self.log.emit(f"⛔ Scan stopped by user ({self.scanned_nodes} nodes scanned)")
+                else:
+                    scan_ok = True
+                    self.finished.emit(result)
+                    suffix = f", {self.skipped_nodes} skipped" if self.skipped_nodes else ""
+                    self.log.emit(f"✅ Scan finished ({self.scanned_nodes} nodes{suffix})")
+
+        except Exception as e:
+            if not scan_ok:
+                self.error.emit(f"Не удалось подключиться к {endpoint}\n{type(e).__name__}: {e}")
+
+    # ── Async BFS tree walk ──────────────────────────────────────────────────
+
+    async def _walk(self, root_node):
+        root_dict = {}
+        current_level = [(root_node, None)]  # (node, parent_children_dict)
+
+        while current_level and not self._stop:
+            next_level = []
+            await asyncio.gather(
+                *[self._process_node(n, p, next_level, root_dict) for n, p in current_level],
+                return_exceptions=True,
+            )
+            current_level = next_level
+
+        return root_dict
+
+    async def _process_node(self, node, parent_children, next_level, root_dict):
+        if self._stop:
+            return
+        async with self._semaphore:
+            nodeid = node.nodeid.to_string()
+            try:
+                name = (await node.read_browse_name()).Name
+            except Exception:
+                name = nodeid
+
+            try:
+                cls = (await node.read_node_class()).name
+            except Exception:
+                cls = "Unknown"
+
+            node_dict = {
+                "browse_name": name,
+                "node_id":     nodeid,
+                "node_class":  cls,
+                "children":    {},
+            }
 
             if cls == "Variable":
                 try:
-                    dt_node = node.get_data_type()
-                    node_dict["data_type"] = DATA_TYPE_MAP.get(dt_node, str(dt_node))
+                    dt_node = await node.read_data_type()
+                    node_dict["data_type"]        = DATA_TYPE_MAP.get(dt_node, str(dt_node))
                     node_dict["data_type_nodeid"] = dt_node.to_string()
-                    node_dict["is_enumeration"] = dt_node == ua.NodeId(ua.ObjectIds.Enumeration)
+                    node_dict["is_enumeration"]   = dt_node == ua.NodeId(ua.ObjectIds.Enumeration)
                 except Exception:
-                    node_dict["data_type"] = "Unknown"
+                    node_dict["data_type"]        = "Unknown"
                     node_dict["data_type_nodeid"] = ""
-                    node_dict["is_enumeration"] = False
+                    node_dict["is_enumeration"]   = False
 
                 try:
-                    ua_access = node.get_user_access_level()
-                    node_dict["access_level"] = "RW" if ua_access & ua.AccessLevel.CurrentWrite else "RO"
+                    ua_access = await node.read_user_access_level()
+                    node_dict["access_level"] = "RW" if ua_access & ua.AccessLevelType.CurrentWrite else "RO"
                 except Exception:
                     node_dict["access_level"] = "Unknown"
 
-            try:
-                children = node.get_children()
-            except Exception:
-                children = []
+            if parent_children is None:
+                root_dict.update(node_dict)
+            else:
+                parent_children[name] = node_dict
 
-            for child in children:
-                child_data = self._walk(child)
-                node_dict["children"][child_data["browse_name"]] = child_data
+            if "|type|" not in nodeid:
+                try:
+                    children = await node.get_children()
+                    for child in children:
+                        next_level.append((child, node_dict["children"]))
+                except Exception as e:
+                    self.log.emit(f"   ⚠ Can't get children of {nodeid} — {type(e).__name__}: {e}")
 
             self.scanned_nodes += 1
-            percent = int((self.scanned_nodes / max(1, self.total_nodes)) * 100)
-            self.progress_value.emit(percent)
-
-        except Exception:
-            pass
-
-        return node_dict
+            self.progress_value.emit(self.scanned_nodes)
+            if self.scanned_nodes % 100 == 0:
+                self.log.emit(
+                    f"   ⏳ Scanned {self.scanned_nodes} nodes... "
+                    f"(next level: {len(next_level)})"
+                )

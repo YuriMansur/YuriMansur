@@ -61,7 +61,7 @@ class OpcUaScanner(QMainWindow):
         layout = QVBoxLayout(central)
 
         top = QHBoxLayout()
-        self.endpoint = QLineEdit("opc.tcp://localhost:4840")
+        self.endpoint = QLineEdit("opc.tcp://192.168.6.6:4840")
         self.scan_btn = QPushButton("▶ Scan")
         self.save_json = QPushButton("💾 Save JSON")
         self.save_py = QPushButton("🐍 Export Python")
@@ -127,22 +127,46 @@ class OpcUaScanner(QMainWindow):
         self.save_py.clicked.connect(self.export_python)
 
     def start_scan(self):
+        # Останавливаем предыдущий воркер если он ещё жив
+        if getattr(self, "worker", None) is not None and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait()
+
         self.tree.clear()
         self.log.clear()
+        self.progress.setMaximum(0)
         self.progress.setValue(0)
+        self.progress.setFormat("Scanning... %v nodes")
+        self.scan_btn.setEnabled(False)
 
         self.worker = ScanWorker(self.endpoint.text())
         self.worker.log.connect(self.log.append)
-        self.worker.error.connect(lambda e: self.log.append(f"❌ {e}"))
+        self.worker.error.connect(self.on_error)
         self.worker.progress_value.connect(self.progress.setValue)
         self.worker.finished.connect(self.on_finished)
         self.worker.start()
+
+    def on_error(self, message):
+        self.progress.setMaximum(100)
+        self.progress.setValue(0)
+        self.progress.setFormat("Error")
+        self.log.append(f"❌ {message}")
+        self.scan_btn.setEnabled(True)
+
+    def closeEvent(self, event):
+        if getattr(self, "worker", None) is not None and self.worker.isRunning():
+            self.worker.stop()   # сигнал мягкой остановки
+            self.worker.wait()   # ждём — finally в run() закроет соединение
+        event.accept()
 
     def on_finished(self, data):
         self.scanned_data = data
         self._build_tree(self.tree.invisibleRootItem(), data)
         self.tree.collapseAll()
+        self.progress.setMaximum(100)
         self.progress.setValue(100)
+        self.progress.setFormat("Done")
+        self.scan_btn.setEnabled(True)
 
     def _build_tree(self, parent, node):
         item = QTreeWidgetItem([node["browse_name"]])
