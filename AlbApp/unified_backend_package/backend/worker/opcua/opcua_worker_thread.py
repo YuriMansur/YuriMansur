@@ -62,15 +62,18 @@ class OpcUaWorkerThread(QThread):
     """
 
     # ===== SIGNALS =====
-    loop_ready = pyqtSignal()  # Event loop готов
-    connected = pyqtSignal()  # Успешное подключение
-    disconnected = pyqtSignal()  # Отключение
-    connection_error = pyqtSignal(str)  # Ошибка подключения
+    loop_ready = pyqtSignal()               # Event loop готов
+    connected = pyqtSignal()                # Успешное подключение
+    disconnected = pyqtSignal()             # Отключение
+    connection_error = pyqtSignal(str)      # Ошибка подключения
     data_updated = pyqtSignal(str, object)  # (node_id, value)
-    tag_subscribed = pyqtSignal(str)  # (node_id)
-    tag_unsubscribed = pyqtSignal(str)  # (node_id)
-    read_completed = pyqtSignal(str, object)  # (node_id, value)
-    write_completed = pyqtSignal(str, bool)  # (node_id, success)
+    tag_subscribed = pyqtSignal(str)        # (node_id)
+    tag_unsubscribed = pyqtSignal(str)      # (node_id)
+    read_completed = pyqtSignal(str, object)   # (node_id, value)
+    write_completed = pyqtSignal(str, bool)    # (node_id, success)
+    batch_read_completed = pyqtSignal(dict)    # {node_id: value}
+    batch_write_completed = pyqtSignal(dict)   # {node_id: success}
+    watchdog_disconnect = pyqtSignal()         # Watchdog обнаружил обрыв
 
     def __init__(
         self,
@@ -121,9 +124,12 @@ class OpcUaWorkerThread(QThread):
         # Создаем НОВЫЙ event loop в этом потоке
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
+        # asyncua 1.x имеет баг: в asyncio debug mode падает issubclass()
+        # при разборе endpoint'ов сервера. Отключаем явно.
+        self.loop.set_debug(False)
 
         # Импортируем здесь, чтобы избежать проблем с импортами
-        from AlbApp.unified_backend_package.worker.opcua.opcua_worker import AsyncOpcUaWorker
+        from unified_backend_package.backend.worker.opcua.opcua_worker import AsyncOpcUaWorker
 
         # Создаем worker с callback для data_updated
         self.worker = AsyncOpcUaWorker(
@@ -402,3 +408,133 @@ class OpcUaWorkerThread(QThread):
         if not self.worker:
             return []
         return self.worker.get_subscribed_tags()
+
+    # ==========================================================================
+    # BATCH READ / WRITE API
+    # ==========================================================================
+
+    def read_multiple_nodes(self, node_ids: List[str]):
+        """
+        Пакетное параллельное чтение нескольких тегов (thread-safe)
+
+        Результат приходит через signal batch_read_completed: {node_id: value}
+        Теги с ошибкой чтения будут иметь значение None.
+
+        Args:
+            node_ids: Список NodeId ["ns=2;s=Temp", "ns=2;s=Pressure", ...]
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+
+        asyncio.run_coroutine_threadsafe(
+            self._async_read_multiple_nodes(node_ids), self.loop
+        )
+
+    async def _async_read_multiple_nodes(self, node_ids: List[str]):
+        try:
+            results = await self.worker.read_multiple_nodes(node_ids)
+            self.batch_read_completed.emit(results)
+        except Exception as e:
+            self.connection_error.emit(f"Batch read error: {e}")
+
+    def write_multiple_nodes(self, values: Dict[str, Any]):
+        """
+        Пакетная параллельная запись нескольких тегов (thread-safe)
+
+        Результат приходит через signal batch_write_completed: {node_id: success}
+
+        Args:
+            values: Словарь {node_id: value} для записи
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+
+        asyncio.run_coroutine_threadsafe(
+            self._async_write_multiple_nodes(values), self.loop
+        )
+
+    async def _async_write_multiple_nodes(self, values: Dict[str, Any]):
+        try:
+            results = await self.worker.write_multiple_nodes(values)
+            self.batch_write_completed.emit(results)
+        except Exception as e:
+            self.connection_error.emit(f"Batch write error: {e}")
+
+    # ==========================================================================
+    # WATCHDOG API
+    # ==========================================================================
+
+    def start_watchdog(self, interval: float = 5.0):
+        """
+        Запустить watchdog — периодическую проверку живости соединения (thread-safe)
+
+        При обнаружении обрыва эмитит:
+          - watchdog_disconnect — специфичный сигнал обрыва
+          - disconnected        — стандартный сигнал отключения
+          - флаг _connected синхронизируется с worker
+
+        Args:
+            interval: Интервал проверки в секундах (рекомендуется 3-10)
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+
+        asyncio.run_coroutine_threadsafe(
+            self._async_start_watchdog(interval), self.loop
+        )
+
+    async def _async_start_watchdog(self, interval: float):
+        await self.worker.start_watchdog(interval)
+        # Запускаем задачу синхронизации: ждём пока watchdog не остановится,
+        # затем проверяем — было ли это из-за обрыва или ручного stop_watchdog()
+        asyncio.ensure_future(self._sync_watchdog_state())
+
+    async def _sync_watchdog_state(self):
+        """
+        Ждёт завершения watchdog и синхронизирует _connected флаг thread с worker.
+
+        Watchdog останавливается в двух случаях:
+          1. Обрыв связи: worker._connected → False  → эмитим disconnected
+          2. Ручной stop_watchdog(): worker._connected остаётся True → ничего не делаем
+        """
+        # Ждём пока watchdog активен (с мелким шагом чтобы не пропустить момент)
+        while self.worker and self.worker.is_watchdog_active:
+            await asyncio.sleep(0.5)
+
+        # Watchdog остановился — проверяем причину
+        if self.worker and not self.worker.is_connected and self._connected:
+            self._connected = False
+            self.watchdog_disconnect.emit()
+            self.disconnected.emit()
+
+    def stop_watchdog(self):
+        """Остановить watchdog (thread-safe)"""
+        if not self.is_loop_ready():
+            return
+
+        asyncio.run_coroutine_threadsafe(
+            self.worker.stop_watchdog(), self.loop
+        )
+
+    @property
+    def is_watchdog_active(self) -> bool:
+        """Проверить активность watchdog"""
+        if not self.worker:
+            return False
+        return self.worker.is_watchdog_active
+
+    # ==========================================================================
+    # STATS
+    # ==========================================================================
+
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Получить статистику операций (синхронный вызов, только чтение)
+
+        Returns:
+            Dict с полями: reads, writes, read_errors, write_errors,
+                           last_read_ms, last_write_ms и др.
+        """
+        if not self.worker:
+            return {}
+        return self.worker.get_stats()

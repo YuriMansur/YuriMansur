@@ -9,7 +9,7 @@ import threading
 from typing import Optional, Dict
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from AlbApp.unified_backend_package.worker.modbustcp.modbus_worker import AsyncPLCWorker
+from unified_backend_package.backend.worker.modbustcp.modbus_worker import AsyncPLCWorker
 
 
 class PLCWorkerThread(QThread):

@@ -6,7 +6,7 @@ OPC UA Worker Package
 - AsyncOpcUaWorker - Async OPC UA логика с asyncua
 """
 
-from AlbApp.unified_backend_package.worker.opcua.opcua_worker_thread import OpcUaWorkerThread
-from AlbApp.unified_backend_package.worker.opcua.opcua_worker import AsyncOpcUaWorker
+from unified_backend_package.backend.worker.opcua.opcua_worker_thread import OpcUaWorkerThread
+from unified_backend_package.backend.worker.opcua.opcua_worker import AsyncOpcUaWorker
 
 __all__ = ["OpcUaWorkerThread", "AsyncOpcUaWorker"]

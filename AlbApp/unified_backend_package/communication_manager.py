@@ -37,7 +37,7 @@ CommunicationManager - Единый менеджер для управления
 
 ПРИМЕР ИСПОЛЬЗОВАНИЯ:
 ====================
-from AlbApp.unified_backend_package.communication_manager import CommunicationManager
+from unified_backend_package.communication_manager import CommunicationManager
 
 # Создаем менеджер
 manager = CommunicationManager()
@@ -78,8 +78,8 @@ manager.read_register("PLC1", "holding", 100, 2, format="float32")
 from typing import Dict, Optional, Any
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from AlbApp.unified_backend_package.backend.modbus_backend import ModbusBackend
-from AlbApp.unified_backend_package.backend.opcua_backend import OpcUaBackend
+from unified_backend_package.backend.modbus_backend import ModbusBackend
+from unified_backend_package.backend.opcua_backend import OpcUaBackend
 
 
 class CommunicationManager(QObject):

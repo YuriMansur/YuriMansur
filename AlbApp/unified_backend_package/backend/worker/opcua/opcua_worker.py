@@ -100,15 +100,12 @@ class AsyncOpcUaWorker:
         namespace: int = 2,
         timeout: float = 10.0,
         on_data_changed: Optional[Callable[[str, Any], None]] = None,
-        # --- Security (аутентификация) ---
         username: Optional[str] = None,
         password: Optional[str] = None,
-        # --- Certificate (сертификат X.509) ---
         certificate_path: Optional[str] = None,
         private_key_path: Optional[str] = None,
         security_policy: Optional[str] = None,
         security_mode: Optional[str] = None,
-        # --- Auto-reconnect ---
         auto_reconnect: bool = False,
         reconnect_interval: float = 5.0,
         max_reconnect_attempts: int = 0):
@@ -221,6 +218,11 @@ class AsyncOpcUaWorker:
         # Ключ — строковый node_id, значение — объект Node.
         self._node_cache: Dict[str, Node] = {}
 
+        # Кэш типов для записи: {node_id: type}
+        # Заполняется при первой записи — читает текущий тип узла с сервера,
+        # чтобы не получать BadTypeMismatch при несовпадении Python-типов.
+        self._write_type_cache: Dict[str, type] = {}
+
         # --- Connection Watchdog ---
         # Периодическая проверка что соединение живое (heartbeat).
         # Обнаруживает обрыв ДО ошибки в read/write — позволяет раньше запустить reconnect.
@@ -300,6 +302,8 @@ class AsyncOpcUaWorker:
             return True
         # Обработка исключений
         except Exception as e:
+            import traceback
+            logger.error(f"Connect failed (full traceback):\n{traceback.format_exc()}")
             # Флаг подключения = False.
             self._connected = False
             # Пробрасываем наверх — OpcUaWorkerThread поймает и эмитит connection_error.
@@ -342,6 +346,7 @@ class AsyncOpcUaWorker:
             self.subscribed_tags.clear()
             # Очищаем кэш Node-объектов — они привязаны к старому Client
             self._node_cache.clear()
+            self._write_type_cache.clear()
             # Очищаем event подписки
             self._event_subscriptions.clear()
             return True
@@ -989,10 +994,19 @@ class AsyncOpcUaWorker:
         try:
             # Получаем Node из кэша (или создаём и кэшируем)
             node = self._get_cached_node(node_id)
+            # При первой записи читаем текущий тип узла с сервера и кэшируем.
+            # Это нужно чтобы избежать BadTypeMismatch: OPC UA требует точного совпадения
+            # типа (Int16, Bool, Float и т.д.), а Python не знает об этом заранее.
+            if node_id not in self._write_type_cache:
+                current = await node.read_value()
+                self._write_type_cache[node_id] = type(current)
+            target_type = self._write_type_cache[node_id]
+            # Приводим значение к типу узла (int→Int16, bool→Bool, float→Float и т.д.)
+            typed_value = target_type(value)
             # Засекаем время для статистики latency
             t0 = time.perf_counter()
             # Ожидаем успешное подтверждение записи
-            await node.write_value(value)
+            await node.write_value(typed_value)
             # Обновляем статистику
             self._stats["writes"] += 1
             self._stats["last_write_ms"] = round((time.perf_counter() - t0) * 1000, 2)

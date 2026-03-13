@@ -2,5 +2,6 @@
     "python.analysis.extraPaths": [
         "./src/wigets",
         "./src/gui/windows/settings_window/tab_wigets"
-    ]
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:system"
 }

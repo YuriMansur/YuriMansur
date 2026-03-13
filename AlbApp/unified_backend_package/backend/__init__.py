@@ -12,7 +12,11 @@ Legacy Package - Backend'ы для Modbus и OPC UA
 - README_BACKEND.md - документация
 """
 
-from AlbApp.unified_backend_package.backend.modbus_backend import ModbusBackend
-from AlbApp.unified_backend_package.backend.opcua_backend import OpcUaBackend
+try:
+    from unified_backend_package.backend.modbus_backend import ModbusBackend
+except ImportError:
+    ModbusBackend = None  # pymodbus не установлен
+
+from unified_backend_package.backend.opcua_backend import OpcUaBackend
 
 __all__ = ["ModbusBackend", "OpcUaBackend"]
