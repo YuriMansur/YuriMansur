@@ -2,10 +2,10 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Demo GUI (OpcUaButton)",
+            "name": "Demo GUI (OpcUaBackend example)",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/unified_backend_package/test_opcua_button.py",
+            "program": "${workspaceFolder}/unified_backend_package/example_opcua_backend_gui.py",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "justMyCode": false,
@@ -18,7 +18,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "cwd": "${fileDirname}",
+            "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {

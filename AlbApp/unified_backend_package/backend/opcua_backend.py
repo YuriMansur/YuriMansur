@@ -1,103 +1,5 @@
-"""
-OpcUaBackend - API для программного управления множественными OPC UA серверами
-
-═══════════════════════════════════════════════════════════════════════════════
-НАЗНАЧЕНИЕ:
-═══════════════════════════════════════════════════════════════════════════════
-Backend класс для управления OPC UA серверами БЕЗ GUI. Предоставляет API для:
-- Добавления/удаления серверов
-- Подключения/отключения
-- Чтения/записи переменных (одиночных и пакетных)
-- Управления подписками на теги
-- Watchdog — автоматическое обнаружение обрыва
-- Получения статистики и данных в реальном времени
-
-АРХИТЕКТУРА:
-============
-    ┌──────────────────────────────────────────────┐
-    │         User Application (ваш код)           │
-    │                                              │
-    │  backend = OpcUaBackend()                   │
-    │  backend.add_server("OPC1", "opc.tcp://...") │
-    │  backend.connect_server("OPC1")             │
-    │  backend.subscribe_tag("OPC1", "ns=2;s=T")  │
-    └───────────────┬──────────────────────────────┘
-                    │
-                    ▼
-    ┌──────────────────────────────────────────────┐
-    │          OpcUaBackend (этот класс)           │
-    │                                              │
-    │  • Управление словарем серверов             │
-    │  • Thread-safe API                          │
-    │  • Callbacks для событий                    │
-    └───────────────┬──────────────────────────────┘
-                    │
-            ┌───────┴────────┐
-            ▼                ▼
-    ┌──────────────┐  ┌──────────────┐
-    │OpcUaWorkerThread│ │OpcUaWorkerThread│
-    │    (OPC1)    │  │    (OPC2)    │
-    │              │  │              │
-    │  asyncio     │  │  asyncio     │
-    │  event loop  │  │  event loop  │
-    └──────────────┘  └──────────────┘
-
-ПРИМЕР ИСПОЛЬЗОВАНИЯ:
-====================
-from unified_backend_package.legacy import OpcUaBackend
-
-# Создаем backend
-backend = OpcUaBackend()
-
-# Callbacks (опционально)
-backend.on_connected = lambda srv_id: print(f"{srv_id} connected!")
-backend.on_data_updated = lambda srv_id, nid, val: print(f"{srv_id}: {nid}={val}")
-backend.on_watchdog_disconnect = lambda srv_id: print(f"{srv_id} connection lost!")
-
-# Добавляем сервер
-backend.add_server(
-    server_id="OPC1",
-    endpoint="opc.tcp://192.168.1.10:4840",
-    namespace=2
-)
-
-# Подключаемся
-backend.connect_server("OPC1")
-
-# Подписываемся на теги
-backend.subscribe_tag("OPC1", "ns=2;s=Temperature", "Temperature")
-backend.subscribe_tag("OPC1", "ns=2;s=Pressure", "Pressure")
-
-# Читаем одно значение (результат через signal read_completed)
-backend.read_node("OPC1", "ns=2;s=SetPoint")
-
-# Читаем несколько сразу (результат через signal batch_read_completed)
-backend.read_multiple_nodes("OPC1", ["ns=2;s=Temperature", "ns=2;s=Pressure"])
-
-# Записываем значение (результат через signal write_completed)
-backend.write_node("OPC1", "ns=2;s=SetPoint", 25.5)
-
-# Записываем несколько (результат через signal batch_write_completed)
-backend.write_multiple_nodes("OPC1", {"ns=2;s=SetPoint": 25.5, "ns=2;s=Mode": 1})
-
-# Watchdog — обнаружение обрыва каждые 5 секунд
-backend.start_watchdog("OPC1", interval=5.0)
-
-# Статистика
-stats = backend.get_stats("OPC1")
-print(stats)  # {"reads": 42, "writes": 5, "read_errors": 0, ...}
-
-# Получаем данные
-data = backend.get_latest_data("OPC1")
-print(data)  # {"ns=2;s=Temperature": 23.5, "ns=2;s=Pressure": 101.3}
-
-# Отключаемся
-backend.disconnect_server("OPC1")
-"""
-
 from typing import Dict, Optional, Callable, Any, List
 from PyQt6.QtCore import QObject, pyqtSignal
-
 from unified_backend_package.backend.worker.opcua.opcua_worker_thread import OpcUaWorkerThread
 
 
@@ -188,10 +90,8 @@ class OpcUaBackend(QObject):
         self.on_tag_subscribed      : Optional[Callable[[str, str], None]] = None
         self.on_watchdog_disconnect : Optional[Callable[[str], None]] = None
 
-    # ==========================================================================
-    # SERVER MANAGEMENT
-    # ==========================================================================
 
+    # SERVER MANAGEMENT
     def add_server(
         self,
         server_id: str,
@@ -294,8 +194,26 @@ class OpcUaBackend(QObject):
         if server["connected"]:
             return True
 
+        # Проверяем жив ли старый thread.
+        # После disconnect thread удаляется через deleteLater() — C++ объект
+        # уничтожается, Python wrapper бросает RuntimeError при обращении.
         thread = server["thread"]
-        if not thread.isRunning():
+        try:
+            is_running = thread.isRunning()
+        except RuntimeError:
+            is_running = False
+            thread = None
+
+        if thread is None or not is_running:
+            # Thread удалён или не запущен — создаём новый для повторного подключения
+            thread = OpcUaWorkerThread(
+                server_id=server_id,
+                endpoint=server["endpoint"],
+                namespace=server["namespace"],
+                timeout=server["timeout"]
+            )
+            self._connect_thread_signals(server_id, thread)
+            server["thread"] = thread
             thread.loop_ready.connect(lambda: thread.connect_to_server())
             thread.start()
         else:
@@ -332,10 +250,24 @@ class OpcUaBackend(QObject):
                 self.connect_server(server_id)
 
     def disconnect_all(self, blocking: bool = False):
-        """Отключить все серверы"""
+        """Отключить все серверы.
+
+        При blocking=True все потоки останавливаются параллельно,
+        потом ждём завершения каждого — итоговое время = max(одного), не сумма.
+        """
+        threads = []
         for server_id in list(self.servers.keys()):
-            if self.is_connected(server_id):
-                self.disconnect_server(server_id, blocking=blocking)
+            server = self.servers.get(server_id)
+            if server and server["connected"]:
+                server["thread"].stop(blocking=False)  # запускаем все сразу
+                threads.append(server["thread"])
+
+        if blocking:
+            for thread in threads:
+                try:
+                    thread.wait(2000)
+                except RuntimeError:
+                    pass  # thread уже удалён
 
     # ==========================================================================
     # READ / WRITE

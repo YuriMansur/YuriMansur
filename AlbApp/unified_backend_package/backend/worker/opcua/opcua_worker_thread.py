@@ -165,25 +165,26 @@ class OpcUaWorkerThread(QThread):
         self._stopping = True
 
         if self.loop and self.worker:
-            # Отключаемся от сервера (если подключены)
-            if self._connected:
-                future = asyncio.run_coroutine_threadsafe(
-                    self.worker.disconnect(), self.loop
-                )
-                if blocking:
-                    try:
-                        future.result(timeout=5.0)
-                    except Exception:
-                        pass
-
-            # Останавливаем event loop
-            self.loop.call_soon_threadsafe(self.loop.stop)
+            # Запускаем shutdown-корутину: сначала disconnect (с эмитом сигнала),
+            # потом stop loop. Это гарантирует что loop.stop() вызывается только
+            # ПОСЛЕ завершения disconnect, а не параллельно с ним.
+            future = asyncio.run_coroutine_threadsafe(
+                self._async_shutdown(), self.loop
+            )
+            if blocking:
+                try:
+                    future.result(timeout=2.0)
+                except Exception:
+                    pass
 
         if blocking:
-            self.wait(5000)  # Ждем завершения потока (max 5 сек)
-
-        # Планируем удаление потока
-        self.deleteLater()
+            self.wait(2000)  # Ждем завершения потока (max 2 сек)
+            self.deleteLater()  # Поток уже завершён — безопасно удалять
+        else:
+            # Удаляем объект только ПОСЛЕ завершения потока.
+            # Прямой вызов deleteLater() здесь опасен: Qt может удалить C++
+            # объект пока run() ещё выполняется → crash → приложение закрывается.
+            self.finished.connect(self.deleteLater)
 
     def is_loop_ready(self) -> bool:
         """Проверка готовности event loop"""
@@ -225,6 +226,24 @@ class OpcUaWorkerThread(QThread):
             self.disconnected.emit()
         except Exception as e:
             self.connection_error.emit(str(e))
+
+    async def _async_shutdown(self):
+        """
+        Корректное завершение: disconnect → emit сигнала → stop loop.
+
+        Используется в stop(). Порядок важен:
+          1. worker.disconnect() — закрывает watchdog, subscription, client
+          2. disconnected.emit() — GUI/backend получают уведомление
+          3. loop.stop() — только после disconnect, не параллельно с ним
+        """
+        if self._connected:
+            try:
+                await self.worker.disconnect()
+                self._connected = False
+                self.disconnected.emit()
+            except Exception as e:
+                self.connection_error.emit(str(e))
+        self.loop.stop()
 
     # ==========================================================================
     # READ / WRITE API
