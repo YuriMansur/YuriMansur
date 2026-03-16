@@ -96,19 +96,19 @@ class SubscriptionHandler:
 class AsyncOpcUaWorker:
     def __init__(
         self,
-        endpoint: str,
-        namespace: int = 2,
-        timeout: float = 10.0,
-        on_data_changed: Optional[Callable[[str, Any], None]] = None,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        certificate_path: Optional[str] = None,
-        private_key_path: Optional[str] = None,
-        security_policy: Optional[str] = None,
-        security_mode: Optional[str] = None,
-        auto_reconnect: bool = False,
-        reconnect_interval: float = 5.0,
-        max_reconnect_attempts: int = 0):
+        endpoint                : str,
+        namespace               : int = 2,
+        timeout                 : float = 10.0,
+        on_data_changed         : Optional[Callable[[str, Any], None]] = None,
+        username                : Optional[str] = None,
+        password                : Optional[str] = None,
+        certificate_path        : Optional[str] = None,
+        private_key_path        : Optional[str] = None,
+        security_policy         : Optional[str] = None,
+        security_mode           : Optional[str] = None,
+        auto_reconnect          : bool = False,
+        reconnect_interval      : float = 5.0,
+        max_reconnect_attempts  : int = 0):
         """
         Args:
             endpoint: URL сервера (например "opc.tcp://192.168.1.10:4840")
@@ -262,13 +262,13 @@ class AsyncOpcUaWorker:
             # Создаём объект Client
                 # - url — адрес сервера ("opc.tcp://192.168.1.10:4840")
                 # - timeout — сколько ждать ответа от сервера (секунды)
-            self.client = Client(url=self.endpoint, timeout=self.timeout)
+            self.client = Client(url = self.endpoint, timeout = self.timeout)
 
-            # --- Security: аутентификация по логину/паролю ---
-            # Если username задан — устанавливаем credentials перед подключением.
-            # Без этого — анонимный доступ (подходит для тестовых серверов).
+            # Аутентификация устанавливаются ПЕРЕД connect(), иначе не будут применены.
             if self._username and self._password:
+                # Логин
                 self.client.set_user(self._username)
+                # Пароль
                 self.client.set_password(self._password)
 
             # --- Security: сертификат X.509 ---
