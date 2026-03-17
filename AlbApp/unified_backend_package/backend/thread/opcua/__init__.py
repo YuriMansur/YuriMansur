@@ -7,6 +7,6 @@ OPC UA Worker Package
 """
 
 from unified_backend_package.backend.worker.opcua.opcua_worker_thread import OpcUaWorkerThread
-from unified_backend_package.backend.worker.opcua.opcua_worker import AsyncOpcUaWorker
+from unified_backend_package.backend.worker.opcua.worker.opcua_worker import AsyncOpcUaWorker
 
 __all__ = ["OpcUaWorkerThread", "AsyncOpcUaWorker"]

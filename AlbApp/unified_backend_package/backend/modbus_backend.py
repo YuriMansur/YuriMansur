@@ -106,6 +106,7 @@ THREAD-SAFETY:
 from typing import Optional, Dict, Callable, Any, Union, List
 from PyQt6.QtCore import QObject, pyqtSignal
 import asyncio
+import threading
 from concurrent.futures import Future
 
 from unified_backend_package.backend.worker.modbustcp.modbus_worker_thread import PLCWorkerThread
@@ -164,6 +165,11 @@ class ModbusBackend(QObject):
         self.on_command_error: Optional[Callable[[str, str], None]] = None
         self.on_data_updated: Optional[Callable[[str, str, dict], None]] = None
 
+        # ===== PENDING SYNC CALLS =====
+        # Один ожидающий Future на PLC для синхронных методов (read_registers и т.д.)
+        self._pending_futures: Dict[str, Future] = {}
+        self._pending_lock = threading.Lock()
+
     # ==========================================================================
     # DEVICE MANAGEMENT API
     # ==========================================================================
@@ -220,9 +226,9 @@ class ModbusBackend(QObject):
         if plc["connected"] and not force:
             return False
 
-        # Если force и подключено - сначала отключаем
+        # Если force и подключено - сначала отключаем (blocking, чтобы thread полностью остановился)
         if plc["connected"] and force:
-            self.disconnect_device(plc_id)
+            self.disconnect_device(plc_id, blocking=True)
 
         # Удаляем устройство
         del self.plcs[plc_id]
@@ -258,7 +264,12 @@ class ModbusBackend(QObject):
             bool: True если подключено, False если нет или устройство не найдено
         """
         plc = self.plcs.get(plc_id)
-        return plc["connected"] if plc else False
+        if not plc:
+            return False
+        thread = plc.get("thread")
+        if thread:
+            return thread.is_connected  # источник истины (учитывает auto-reconnect)
+        return plc["connected"]
 
     # ==========================================================================
     # CONNECTION API
@@ -379,6 +390,55 @@ class ModbusBackend(QObject):
 
         plc["thread"].execute_command(command)
 
+    def execute_command_sync(self, plc_id: str, command: tuple, timeout: float = 5.0) -> Any:
+        """
+        Выполнить команду синхронно и вернуть результат.
+
+        Args:
+            plc_id: ID устройства
+            command: tuple команды ("read", type, address, count) или
+                    ("write", type, address, count, value)
+            timeout: Таймаут ожидания результата (секунды)
+
+        Returns:
+            Результат команды или None при ошибке
+
+        Example:
+            result = backend.execute_command_sync("PLC1", ("read", "holding", 0, 10))
+            print(f"Data: {result}")
+        """
+        plc = self.plcs.get(plc_id)
+        if not plc or not plc.get("thread"):
+            return None
+        try:
+            return self._execute_and_wait(plc_id, command, timeout)
+        except Exception:
+            return None
+
+    def _execute_and_wait(self, plc_id: str, command: tuple, timeout: float) -> Any:
+        """
+        Отправить команду и заблокировать поток до получения результата.
+
+        Использует per-PLC Future из self._pending_futures — не затрагивает
+        глобальные on_command_completed / on_command_error, поэтому
+        параллельные вызовы на разных PLC полностью независимы.
+
+        Raises:
+            RuntimeError: Если для этого plc_id уже есть ожидающая операция.
+            Exception:    При ошибке команды или по таймауту.
+        """
+        with self._pending_lock:
+            if plc_id in self._pending_futures and not self._pending_futures[plc_id].done():
+                raise RuntimeError(f"Another sync command is already pending for '{plc_id}'")
+            fut: Future = Future()
+            self._pending_futures[plc_id] = fut
+        try:
+            self.execute_command(plc_id, command)
+            return fut.result(timeout=timeout)
+        finally:
+            with self._pending_lock:
+                self._pending_futures.pop(plc_id, None)
+
     # ==========================================================================
     # POLL API
     # ==========================================================================
@@ -487,82 +547,36 @@ class ModbusBackend(QObject):
         if not plc or not plc["connected"] or not plc.get("thread"):
             return None
 
-        # Подготовка Future для синхронного ожидания результата
-        result_future = Future()
-
-        def on_result(plc_id_res, result):
-            if plc_id_res == plc_id:
-                try:
-                    # Применяем преобразование формата
-                    if format == "raw":
-                        result_future.set_result(result)
-                    elif format == "float32":
-                        if len(result) < 2:
-                            result_future.set_exception(ValueError("Need 2 registers for float32"))
-                            return
-                        value = ConvertProtocolData.convert_4bytes(
-                            [result[0], result[1]], "float32", byte_order
-                        )
-                        result_future.set_result(value)
-                    elif format == "float64":
-                        if len(result) < 4:
-                            result_future.set_exception(ValueError("Need 4 registers for float64"))
-                            return
-                        # Float64 через struct (нет в ConvertProtocolData)
-                        import struct
-                        bytes_data = b''.join(r.to_bytes(2, 'big') for r in result[:4])
-                        value = struct.unpack('>d', bytes_data)[0]
-                        result_future.set_result(value)
-                    elif format == "int32":
-                        if len(result) < 2:
-                            result_future.set_exception(ValueError("Need 2 registers for int32"))
-                            return
-                        value = ConvertProtocolData.convert_4bytes(
-                            [result[0], result[1]], "int32", byte_order
-                        )
-                        result_future.set_result(value)
-                    elif format == "uint32":
-                        if len(result) < 2:
-                            result_future.set_exception(ValueError("Need 2 registers for uint32"))
-                            return
-                        value = ConvertProtocolData.convert_4bytes(
-                            [result[0], result[1]], "uint32", byte_order
-                        )
-                        result_future.set_result(value)
-                    elif format == "int16_signed":
-                        signed_values = [ConvertProtocolData.to_signed_16(v) for v in result]
-                        result_future.set_result(signed_values)
-                    else:
-                        result_future.set_exception(ValueError(f"Unknown format: {format}"))
-                except Exception as e:
-                    result_future.set_exception(e)
-
-        def on_error(plc_id_err, error):
-            if plc_id_err == plc_id:
-                result_future.set_exception(Exception(error))
-
-        # Временно подключаем callbacks
-        old_on_command_completed = self.on_command_completed
-        old_on_command_error = self.on_command_error
-
-        self.on_command_completed = on_result
-        self.on_command_error = on_error
-
         try:
-            # Выполняем команду чтения
-            command = ("read", reg_type, address, count)
-            self.execute_command(plc_id, command)
+            result = self._execute_and_wait(plc_id, ("read", reg_type, address, count), timeout)
 
-            # Ждем результат
-            return result_future.result(timeout=timeout)
+            if format == "raw":
+                return result
+            elif format == "float32":
+                if len(result) < 2:
+                    return None
+                return ConvertProtocolData.convert_4bytes([result[0], result[1]], "float32", byte_order)
+            elif format == "float64":
+                if len(result) < 4:
+                    return None
+                import struct
+                bytes_data = b''.join(r.to_bytes(2, 'big') for r in result[:4])
+                return struct.unpack('>d', bytes_data)[0]
+            elif format == "int32":
+                if len(result) < 2:
+                    return None
+                return ConvertProtocolData.convert_4bytes([result[0], result[1]], "int32", byte_order)
+            elif format == "uint32":
+                if len(result) < 2:
+                    return None
+                return ConvertProtocolData.convert_4bytes([result[0], result[1]], "uint32", byte_order)
+            elif format == "int16_signed":
+                return [ConvertProtocolData.to_signed_16(v) for v in result]
+            else:
+                return None
 
-        except Exception as e:
+        except Exception:
             return None
-
-        finally:
-            # Восстанавливаем старые callbacks
-            self.on_command_completed = old_on_command_completed
-            self.on_command_error = old_on_command_error
 
     def write_registers(
         self,
@@ -636,38 +650,10 @@ class ModbusBackend(QObject):
             else:
                 return False
 
-            # Подготовка Future для синхронного ожидания
-            result_future = Future()
+            self._execute_and_wait(plc_id, ("write", reg_type, address, len(registers), registers), timeout)
+            return True
 
-            def on_result(plc_id_res, result):
-                if plc_id_res == plc_id:
-                    result_future.set_result(True)
-
-            def on_error(plc_id_err, error):
-                if plc_id_err == plc_id:
-                    result_future.set_result(False)
-
-            # Временно подключаем callbacks
-            old_on_command_completed = self.on_command_completed
-            old_on_command_error = self.on_command_error
-
-            self.on_command_completed = on_result
-            self.on_command_error = on_error
-
-            try:
-                # Выполняем команду записи
-                command = ("write", reg_type, address, len(registers), registers)
-                self.execute_command(plc_id, command)
-
-                # Ждем результат
-                return result_future.result(timeout=timeout)
-
-            finally:
-                # Восстанавливаем старые callbacks
-                self.on_command_completed = old_on_command_completed
-                self.on_command_error = old_on_command_error
-
-        except Exception as e:
+        except Exception:
             return False
 
     def read_bit(
@@ -852,13 +838,25 @@ class ModbusBackend(QObject):
 
     def _on_command_result(self, plc_id: str, result):
         """Обработчик результата команды"""
-        # Вызываем callback
+        # Разрешаем pending future для синхронных методов (не затрагивает глобальные callbacks)
+        with self._pending_lock:
+            fut = self._pending_futures.get(plc_id)
+        if fut and not fut.done():
+            fut.set_result(result)
+
+        # Вызываем глобальный callback
         if self.on_command_completed:
             self.on_command_completed(plc_id, result)
 
     def _on_command_error(self, plc_id: str, error: str):
         """Обработчик ошибки команды"""
-        # Вызываем callback
+        # Разрешаем pending future с исключением
+        with self._pending_lock:
+            fut = self._pending_futures.get(plc_id)
+        if fut and not fut.done():
+            fut.set_exception(Exception(error))
+
+        # Вызываем глобальный callback
         if self.on_command_error:
             self.on_command_error(plc_id, error)
 

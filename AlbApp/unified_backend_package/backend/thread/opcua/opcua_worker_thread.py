@@ -74,6 +74,14 @@ class OpcUaWorkerThread(QThread):
     batch_read_completed = pyqtSignal(dict)    # {node_id: value}
     batch_write_completed = pyqtSignal(dict)   # {node_id: success}
     watchdog_disconnect = pyqtSignal()         # Watchdog обнаружил обрыв
+    # Exploration signals
+    browse_completed = pyqtSignal(list)        # [{"node_id", "name", "node_class", "children"}]
+    node_info_completed = pyqtSignal(dict)     # {"node_id", "value", "source_timestamp", ...}
+    method_completed = pyqtSignal(object)      # результат вызова метода (любой тип)
+    methods_discovered = pyqtSignal(list)      # [{"node_id", "name"}, ...]
+    history_completed = pyqtSignal(str, list)  # (node_id, [{"timestamp", "value", "status"}])
+    history_multiple_completed = pyqtSignal(dict)  # {node_id: [{"timestamp", "value", "status"}]}
+    event_received = pyqtSignal(dict)          # {"source", "message", "severity", "time", "event_type"}
 
     def __init__(
         self,
@@ -110,6 +118,7 @@ class OpcUaWorkerThread(QThread):
         self._loop_ready = False
         self._latest_data_lock = threading.Lock()
         self._latest_data: Dict[str, Any] = {}
+        self._data_changed_flag = False  # dirty-флаг для has_data_changed()
 
     # ==========================================================================
     # QTHREAD LIFECYCLE
@@ -129,7 +138,7 @@ class OpcUaWorkerThread(QThread):
         self.loop.set_debug(False)
 
         # Импортируем здесь, чтобы избежать проблем с импортами
-        from unified_backend_package.backend.worker.opcua.opcua_worker import AsyncOpcUaWorker
+        from unified_backend_package.backend.worker.opcua.worker.opcua_worker import AsyncOpcUaWorker
 
         # Создаем worker с callback для data_updated
         self.worker = AsyncOpcUaWorker(
@@ -381,9 +390,10 @@ class OpcUaWorkerThread(QThread):
 
         Вызывается в asyncio потоке, эмитит signal для GUI
         """
-        # Сохраняем в thread-safe словарь
+        # Сохраняем в thread-safe словарь и выставляем dirty-флаг
         with self._latest_data_lock:
             self._latest_data[node_id] = value
+            self._data_changed_flag = True
 
         # Эмитим signal для GUI
         self.data_updated.emit(node_id, value)
@@ -395,31 +405,30 @@ class OpcUaWorkerThread(QThread):
 
     def has_data_changed(self) -> bool:
         """
-        Проверить, изменились ли данные
+        Проверить, изменились ли данные с момента последнего вызова.
+
+        Использует dirty-флаг, выставляемый в _on_data_changed().
+        Безопасен для любых типов значений (list, dict, numpy и т.д.).
 
         Returns:
-            bool: True если есть новые данные
+            True если пришли новые данные с последнего вызова.
         """
-        if not self.worker:
-            return False
-
         with self._latest_data_lock:
-            current_hash = hash(frozenset(self._latest_data.items()))
-
-        # Сравниваем с предыдущим hash
-        if not hasattr(self, '_prev_hash'):
-            self._prev_hash = current_hash
-            return True
-
-        if current_hash != self._prev_hash:
-            self._prev_hash = current_hash
-            return True
-
+            if self._data_changed_flag:
+                self._data_changed_flag = False
+                return True
         return False
 
     @property
     def is_connected(self) -> bool:
-        """Проверка подключения"""
+        """
+        Проверка подключения.
+
+        Делегируем в worker.is_connected — он является источником истины,
+        в том числе после auto-reconnect когда thread._connected не обновляется.
+        """
+        if self.worker:
+            return self.worker.is_connected
         return self._connected
 
     def get_subscribed_tags(self) -> List[str]:
@@ -478,6 +487,49 @@ class OpcUaWorkerThread(QThread):
             self.batch_write_completed.emit(results)
         except Exception as e:
             self.connection_error.emit(f"Batch write error: {e}")
+
+    # ==========================================================================
+    # POLLING API
+    # ==========================================================================
+
+    def start_polling(self, name: str, node_ids: List[str], interval: float = 1.0):
+        """
+        Запустить именованный цикл опроса тегов (thread-safe).
+
+        Результаты приходят через signal data_updated(node_id, value)
+        — тот же что и у подписок.
+
+        Args:
+            name    : уникальное имя цикла ("fast", "slow", ...)
+            node_ids: список NodeId для опроса
+            interval: интервал опроса в секундах (по умолчанию 1.0)
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+
+        asyncio.run_coroutine_threadsafe(
+            self.worker.start_polling(name, node_ids, interval), self.loop
+        )
+
+    def stop_polling(self, name: Optional[str] = None):
+        """
+        Остановить цикл(ы) опроса (thread-safe).
+
+        Args:
+            name: имя цикла или None для остановки всех
+        """
+        if not self.is_loop_ready():
+            return
+
+        asyncio.run_coroutine_threadsafe(
+            self.worker.stop_polling(name), self.loop
+        )
+
+    def get_active_polls(self) -> Dict[str, Dict]:
+        """Получить информацию об активных poll loop'ах (синхронный вызов)."""
+        if not self.worker:
+            return {}
+        return self.worker.get_active_polls()
 
     # ==========================================================================
     # WATCHDOG API
@@ -541,6 +593,172 @@ class OpcUaWorkerThread(QThread):
         if not self.worker:
             return False
         return self.worker.is_watchdog_active
+
+    # ==========================================================================
+    # EXPLORATION API (browse + node_info + methods + history + events)
+    # ==========================================================================
+
+    def browse_nodes(self, start_node_id: Optional[str] = None, depth: int = 1):
+        """
+        Обзор дерева узлов сервера (thread-safe).
+
+        Результат приходит через signal browse_completed(list).
+
+        Args:
+            start_node_id: Стартовый узел. None = Objects (корень).
+            depth: Глубина рекурсии (1 = только дочерние).
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+        asyncio.run_coroutine_threadsafe(
+            self.async_browse_nodes(start_node_id, depth), self.loop
+        )
+
+    async def async_browse_nodes(self, start_node_id: Optional[str], depth: int):
+        try:
+            result = await self.worker.browse_nodes(start_node_id, depth)
+            self.browse_completed.emit(result)
+        except Exception as e:
+            self.connection_error.emit(f"Browse error: {e}")
+
+    def read_node_info(self, node_id: str):
+        """
+        Расширенное чтение узла — значение + timestamp + quality + тип (thread-safe).
+
+        Результат приходит через signal node_info_completed(dict).
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+        asyncio.run_coroutine_threadsafe(
+            self.async_read_node_info(node_id), self.loop
+        )
+
+    async def async_read_node_info(self, node_id: str):
+        try:
+            result = await self.worker.read_node_info(node_id)
+            self.node_info_completed.emit(result)
+        except Exception as e:
+            self.connection_error.emit(f"Read node info error: {e}")
+
+    def call_method(self, parent_node_id: str, method_node_id: str, args: Optional[List] = None):
+        """
+        Вызов OPC UA метода на сервере (thread-safe).
+
+        Результат приходит через signal method_completed(object).
+
+        Args:
+            parent_node_id: Адрес Object-узла владельца ("ns=2;s=MyDevice").
+            method_node_id: Адрес метода ("ns=2;s=StartPump").
+            args: Список аргументов или None.
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+        asyncio.run_coroutine_threadsafe(
+            self.async_call_method(parent_node_id, method_node_id, args), self.loop
+        )
+
+    async def async_call_method(self, parent_node_id: str, method_node_id: str, args: Optional[List]):
+        try:
+            result = await self.worker.call_method(parent_node_id, method_node_id, args)
+            self.method_completed.emit(result)
+        except Exception as e:
+            self.connection_error.emit(f"Method call error: {e}")
+
+    def discover_methods(self, object_node_id: str):
+        """
+        Обнаружить доступные методы на объекте (thread-safe).
+
+        Результат приходит через signal methods_discovered(list).
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+        asyncio.run_coroutine_threadsafe(
+            self.async_discover_methods(object_node_id), self.loop
+        )
+
+    async def async_discover_methods(self, object_node_id: str):
+        try:
+            result = await self.worker.discover_methods(object_node_id)
+            self.methods_discovered.emit(result)
+        except Exception as e:
+            self.connection_error.emit(f"Discover methods error: {e}")
+
+    def read_history(self, node_id: str, start_time=None, end_time=None, num_values: int = 0):
+        """
+        Чтение исторических данных тега за период (thread-safe).
+
+        Результат приходит через signal history_completed(node_id, list).
+
+        Args:
+            node_id: Адрес узла ("ns=2;s=Temperature").
+            start_time: Начало периода UTC (None = час назад).
+            end_time:   Конец периода UTC (None = сейчас).
+            num_values: Макс. число точек (0 = все).
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+        asyncio.run_coroutine_threadsafe(
+            self.async_read_history(node_id, start_time, end_time, num_values), self.loop
+        )
+
+    async def async_read_history(self, node_id: str, start_time, end_time, num_values: int):
+        try:
+            result = await self.worker.read_history(node_id, start_time, end_time, num_values)
+            self.history_completed.emit(node_id, result)
+        except Exception as e:
+            self.connection_error.emit(f"History read error: {e}")
+
+    def read_history_multiple(self, node_ids: List[str], start_time=None, end_time=None, num_values: int = 0):
+        """
+        Пакетное чтение истории нескольких тегов параллельно (thread-safe).
+
+        Результат приходит через signal history_multiple_completed(dict).
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+        asyncio.run_coroutine_threadsafe(
+            self.async_read_history_multiple(node_ids, start_time, end_time, num_values), self.loop
+        )
+
+    async def async_read_history_multiple(self, node_ids: List[str], start_time, end_time, num_values: int):
+        try:
+            result = await self.worker.read_history_multiple(node_ids, start_time, end_time, num_values)
+            self.history_multiple_completed.emit(result)
+        except Exception as e:
+            self.connection_error.emit(f"History multiple read error: {e}")
+
+    def subscribe_events(self, source_node_id: Optional[str] = None):
+        """
+        Подписаться на OPC UA события (аварии, условия) (thread-safe).
+
+        События приходят через signal event_received(dict):
+            {"source", "message", "severity", "time", "event_type"}
+
+        Args:
+            source_node_id: Источник событий. None = все события сервера.
+        """
+        if not self.is_loop_ready():
+            raise RuntimeError("Event loop not ready")
+        asyncio.run_coroutine_threadsafe(
+            self.async_subscribe_events(source_node_id), self.loop
+        )
+
+    async def async_subscribe_events(self, source_node_id: Optional[str]):
+        try:
+            await self.worker.subscribe_events(
+                source_node_id=source_node_id,
+                event_callback=lambda event: self.event_received.emit(event),
+            )
+        except Exception as e:
+            self.connection_error.emit(f"Subscribe events error: {e}")
+
+    def unsubscribe_events(self, source_node_id: Optional[str] = None):
+        """Отписаться от событий (thread-safe)."""
+        if not self.is_loop_ready():
+            return
+        asyncio.run_coroutine_threadsafe(
+            self.worker.unsubscribe_events(source_node_id), self.loop
+        )
 
     # ==========================================================================
     # STATS

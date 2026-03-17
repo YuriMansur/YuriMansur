@@ -1,11 +1,9 @@
 """
-Пример использования OpcUaBackend — GUI версия
-===============================================
+GUI для OpcUaController
+========================
 
-Повторяет логику example_opcua_backend.py, но с интерфейсом:
-  - Все операции вызываются кнопками
-  - Результаты отображаются в логе
-  - Статус соединения виден визуально
+Только UI: кнопки, поля ввода, лог, сигналы.
+Вся логика подключения — в example_opcua_backend.OpcUaController.
 
 Запуск:
     python -m unified_backend_package.example_opcua_backend_gui
@@ -13,24 +11,19 @@
 
 import sys
 from pathlib import Path
-# Добавляем корень проекта в путь — чтобы работало и через F5, и через python -m
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QGroupBox,
-    QPushButton, QLabel, QLineEdit, QTextEdit, QFormLayout
+    QPushButton, QLabel, QLineEdit, QTextEdit, QFormLayout,
 )
-from PyQt6.QtCore import Qt, QDateTime
+from PyQt6.QtCore import Qt, QDateTime, QTimer
 from PyQt6.QtGui import QFont
 
-from unified_backend_package.backend.opcua_backend import OpcUaBackend
-
-
-ENDPOINT   = "opc.tcp://192.168.6.6:4840"
-NODE_READ  = "ns=2;s=Temperature"
-NODE_WRITE = "ns=2;s=Start"
-NODE_SUB   = "ns=2;s=Pressure"
+from unified_backend_package.example_opcua_backend import (
+    OpcUaController, NODE_READ, NODE_WRITE, NODE_SUB, ENDPOINT,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -58,10 +51,17 @@ class ExampleWindow(QMainWindow):
         self.setWindowTitle("OpcUaBackend — GUI пример")
         self.setMinimumWidth(680)
 
-        self.backend = OpcUaBackend()
+        self.ctrl = OpcUaController(
+            endpoint=ENDPOINT,
+            auto_reconnect=True,
+            reconnect_interval=5,
+        )
 
         self._build_ui()
         self._connect_signals()
+
+        # Запускаем подключение после отрисовки окна
+        QTimer.singleShot(0, self.ctrl.start)
 
     # ─────────────────────────────────────────────────────────────────────────
     # UI
@@ -72,7 +72,7 @@ class ExampleWindow(QMainWindow):
         root.setSpacing(6)
         root.setContentsMargins(10, 10, 10, 10)
 
-        root.addWidget(self._group_connection())
+        root.addWidget(self._group_status())
         root.addWidget(self._group_read_write())
         root.addWidget(self._group_subscriptions())
         root.addWidget(self._group_watchdog())
@@ -82,43 +82,29 @@ class ExampleWindow(QMainWindow):
         w.setLayout(root)
         self.setCentralWidget(w)
 
-    def _group_connection(self) -> QGroupBox:
-        box = QGroupBox("1. Подключение")
+    def _group_status(self) -> QGroupBox:
+        box = QGroupBox("Соединение")
         form = QFormLayout(box)
 
-        self.le_endpoint = QLineEdit(ENDPOINT)
-        form.addRow("Endpoint:", self.le_endpoint)
+        row_status = QHBoxLayout()
+        self.lbl_status = QLabel("◌ Подключение...")
+        self.lbl_status.setStyleSheet("color:#f39c12; font-weight:bold;")
+        row_status.addWidget(self.lbl_status)
+        row_status.addStretch()
+        form.addRow(row_status)
 
-        row = QHBoxLayout()
-        self.lbl_status = QLabel("● Отключен")
-        self.lbl_status.setStyleSheet("color:#e74c3c; font-weight:bold;")
-
-        self.btn_connect    = QPushButton("Подключить")
-        self.btn_disconnect = QPushButton("Отключить")
-        self.btn_disconnect.setEnabled(False)
-
-        self.btn_connect.clicked.connect(self._on_connect)
-        self.btn_disconnect.clicked.connect(self._on_disconnect)
-
-        row.addWidget(self.lbl_status)
-        row.addStretch()
-        row.addWidget(self.btn_connect)
-        row.addWidget(self.btn_disconnect)
-        form.addRow(row)
         return box
 
     def _group_read_write(self) -> QGroupBox:
-        box = QGroupBox("2. Чтение / запись")
+        box = QGroupBox("1. Чтение / запись")
         v = QVBoxLayout(box)
 
-        # Строка ввода node_id
         row_node = QHBoxLayout()
         row_node.addWidget(QLabel("NodeId:"))
-        self.le_node = QLineEdit(NODE_READ)
+        self.le_node = QLineEdit(NODE_READ[0])
         row_node.addWidget(self.le_node)
         v.addLayout(row_node)
 
-        # Кнопки
         row_btns = QHBoxLayout()
         self.btn_read        = QPushButton("Читать")
         self.btn_write       = QPushButton("Записать 1")
@@ -130,8 +116,10 @@ class ExampleWindow(QMainWindow):
             btn.setEnabled(False)
             row_btns.addWidget(btn)
 
-        self.btn_read.clicked.connect(self._on_read)
-        self.btn_write.clicked.connect(self._on_write)
+        self.btn_read.clicked.connect(
+            lambda: self.ctrl.read_node(self.le_node.text().strip()))
+        self.btn_write.clicked.connect(
+            lambda: self.ctrl.write_node(self.le_node.text().strip(), 1))
         self.btn_batch_read.clicked.connect(self._on_batch_read)
         self.btn_batch_write.clicked.connect(self._on_batch_write)
 
@@ -139,12 +127,12 @@ class ExampleWindow(QMainWindow):
         return box
 
     def _group_subscriptions(self) -> QGroupBox:
-        box = QGroupBox("3. Подписки (push)")
+        box = QGroupBox("2. Подписки (push)")
         v = QVBoxLayout(box)
 
         row_node = QHBoxLayout()
         row_node.addWidget(QLabel("NodeId:"))
-        self.le_sub_node = QLineEdit(NODE_SUB)
+        self.le_sub_node = QLineEdit(NODE_SUB[0])
         row_node.addWidget(self.le_sub_node)
         v.addLayout(row_node)
 
@@ -158,15 +146,19 @@ class ExampleWindow(QMainWindow):
             row_btns.addWidget(btn)
         row_btns.addStretch()
 
-        self.btn_subscribe.clicked.connect(self._on_subscribe)
-        self.btn_unsubscribe.clicked.connect(self._on_unsubscribe)
-        self.btn_show_tags.clicked.connect(self._on_show_tags)
+        self.btn_subscribe.clicked.connect(
+            lambda: self.ctrl.subscribe_tag(self.le_sub_node.text().strip()))
+        self.btn_unsubscribe.clicked.connect(
+            lambda: self.ctrl.unsubscribe_tag(self.le_sub_node.text().strip()))
+        self.btn_show_tags.clicked.connect(
+            lambda: self.log.write(
+                f"активные подписки: {self.ctrl.get_subscribed_tags() or '(нет)'}"))
 
         v.addLayout(row_btns)
         return box
 
     def _group_watchdog(self) -> QGroupBox:
-        box = QGroupBox("4. Watchdog / статистика")
+        box = QGroupBox("3. Watchdog / статистика")
         row = QHBoxLayout(box)
 
         self.btn_watchdog_start = QPushButton("Watchdog старт (5с)")
@@ -178,8 +170,9 @@ class ExampleWindow(QMainWindow):
             row.addWidget(btn)
         row.addStretch()
 
-        self.btn_watchdog_start.clicked.connect(self._on_watchdog_start)
-        self.btn_watchdog_stop.clicked.connect(self._on_watchdog_stop)
+        self.btn_watchdog_start.clicked.connect(
+            lambda: self.ctrl.start_watchdog(interval=5.0))
+        self.btn_watchdog_stop.clicked.connect(self.ctrl.stop_watchdog)
         self.btn_stats.clicked.connect(self._on_stats)
 
         return box
@@ -196,63 +189,55 @@ class ExampleWindow(QMainWindow):
         return box
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Signals
+    # Сигналы контроллера → обновление UI
     # ─────────────────────────────────────────────────────────────────────────
 
     def _connect_signals(self):
-        b = self.backend
+        c = self.ctrl
 
-        b.server_connected.connect(self._on_server_connected)
-        b.server_disconnected.connect(self._on_server_disconnected)
-        b.server_error.connect(
+        c.server_connected.connect(self._on_connected)
+        c.server_disconnected.connect(self._on_disconnected)
+        c.reconnecting.connect(
+            lambda srv, sec: self.log.write(
+                f"[{srv}] переподключение через {sec} сек...", "#f39c12"))
+        c.server_error.connect(
             lambda srv, err: self.log.write(f"[{srv}] ошибка: {err}", "#e74c3c"))
 
-        b.data_updated.connect(
+        c.data_updated.connect(
             lambda srv, nid, val: self.log.write(
                 f"[{srv}] push {nid} = {val}", "#3498db"))
-
-        b.read_completed.connect(
+        c.read_completed.connect(
             lambda srv, nid, val: self.log.write(
                 f"[{srv}] read {nid} = {val}", "#1abc9c"))
-
-        b.write_completed.connect(
+        c.write_completed.connect(
             lambda srv, nid, ok: self.log.write(
                 f"[{srv}] write {nid} → {'OK' if ok else 'FAIL'}",
                 "#2ecc71" if ok else "#e74c3c"))
-
-        b.batch_read_completed.connect(
+        c.batch_read_completed.connect(
             lambda srv, res: self.log.write(
                 f"[{srv}] batch_read → {res}", "#1abc9c"))
-
-        b.batch_write_completed.connect(
+        c.batch_write_completed.connect(
             lambda srv, res: self.log.write(
                 f"[{srv}] batch_write → {res}", "#f39c12"))
-
-        b.tag_subscribed.connect(
+        c.tag_subscribed.connect(
             lambda srv, nid: self.log.write(
                 f"[{srv}] подписка активна: {nid}", "#9b59b6"))
-
-        b.tag_unsubscribed.connect(
+        c.tag_unsubscribed.connect(
             lambda srv, nid: self.log.write(
                 f"[{srv}] отписан: {nid}", "#95a5a6"))
-
-        b.watchdog_disconnect.connect(
+        c.watchdog_disconnect.connect(
             lambda srv: self.log.write(
                 f"[{srv}] WATCHDOG: соединение потеряно!", "#e67e22"))
 
-    def _on_server_connected(self, srv: str):
+    def _on_connected(self, srv: str):
         self.lbl_status.setText("● Подключен")
         self.lbl_status.setStyleSheet("color:#2ecc71; font-weight:bold;")
-        self.btn_connect.setEnabled(False)
-        self.btn_disconnect.setEnabled(True)
         self._set_ops_enabled(True)
         self.log.write(f"[{srv}] подключен", "#2ecc71")
 
-    def _on_server_disconnected(self, srv: str):
+    def _on_disconnected(self, srv: str):
         self.lbl_status.setText("● Отключен")
         self.lbl_status.setStyleSheet("color:#e74c3c; font-weight:bold;")
-        self.btn_connect.setEnabled(True)
-        self.btn_disconnect.setEnabled(False)
         self._set_ops_enabled(False)
         self.log.write(f"[{srv}] отключен")
 
@@ -264,77 +249,21 @@ class ExampleWindow(QMainWindow):
             btn.setEnabled(enabled)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Слоты кнопок
     # ─────────────────────────────────────────────────────────────────────────
-
-    def _on_connect(self):
-        endpoint = self.le_endpoint.text().strip()
-        if not endpoint:
-            return
-        self.lbl_status.setText("◌ Подключение...")
-        self.lbl_status.setStyleSheet("color:#f39c12; font-weight:bold;")
-        self.btn_connect.setEnabled(False)
-        self.log.write(f"Подключение к {endpoint}...")
-        if "PLC1" not in self.backend.servers:
-            self.backend.add_server("PLC1", endpoint)
-        else:
-            # Обновляем endpoint если изменился
-            self.backend.servers["PLC1"]["endpoint"] = endpoint
-        self.backend.connect_server("PLC1")
-
-    def _on_disconnect(self):
-        self.backend.disconnect_server("PLC1", blocking=False)
-        self.log.write("Отключение...")
-
-    def _on_read(self):
-        node = self.le_node.text().strip()
-        if node:
-            self.backend.read_node("PLC1", node)
-            self.log.write(f"read → {node}")
-
-    def _on_write(self):
-        node = self.le_node.text().strip()
-        if node:
-            self.backend.write_node("PLC1", node, 1)
-            self.log.write(f"write {node} ← 1")
+    # Сложные слоты кнопок
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _on_batch_read(self):
         node = self.le_node.text().strip()
-        nodes = [node, NODE_WRITE] if node else [NODE_READ, NODE_WRITE]
-        self.backend.read_multiple_nodes("PLC1", nodes)
-        self.log.write(f"batch_read → {nodes}")
+        nodes = [node, NODE_WRITE[0]] if node else [NODE_READ[0], NODE_WRITE[0]]
+        self.ctrl.read_multiple_nodes(nodes)
 
     def _on_batch_write(self):
-        node = self.le_node.text().strip() or NODE_WRITE
-        self.backend.write_multiple_nodes("PLC1", {node: 1, "ns=2;s=Reset": 0})
-        self.log.write(f"batch_write → {node}, ns=2;s=Reset")
-
-    def _on_subscribe(self):
-        node = self.le_sub_node.text().strip()
-        if node:
-            self.backend.subscribe_tag("PLC1", node)
-            self.log.write(f"subscribe → {node}")
-
-    def _on_unsubscribe(self):
-        node = self.le_sub_node.text().strip()
-        if node:
-            self.backend.unsubscribe_tag("PLC1", node)
-            self.log.write(f"unsubscribe → {node}")
-
-    def _on_show_tags(self):
-        tags = self.backend.get_subscribed_tags("PLC1")
-        self.log.write(f"активные подписки: {tags or '(нет)'}")
-
-    def _on_watchdog_start(self):
-        self.backend.start_watchdog("PLC1", interval=5.0)
-        self.log.write("watchdog запущен (5 сек)")
-
-    def _on_watchdog_stop(self):
-        self.backend.stop_watchdog("PLC1")
-        self.log.write("watchdog остановлен")
+        node = self.le_node.text().strip() or NODE_WRITE[0]
+        self.ctrl.write_multiple_nodes({node: 1, "ns=2;s=Reset": 0})
 
     def _on_stats(self):
-        stats = self.backend.get_stats("PLC1")
+        stats = self.ctrl.get_stats()
         if not stats:
             self.log.write("нет данных (не подключён?)")
             return
@@ -345,13 +274,10 @@ class ExampleWindow(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
-        # Скрываем окно сразу — пользователь видит что приложение закрылось.
-        # Cleanup (disconnect от OPC UA серверов) происходит в фоне.
         self.hide()
         event.ignore()
-        self.backend.stop_all()
+        self.ctrl.stop()
         QApplication.instance().quit()
-
 
 
 def main():
@@ -362,12 +288,9 @@ def main():
     win.raise_()
     win.activateWindow()
 
-    # Windows: принудительно выводим окно на передний план
-    # (VSCode блокирует SetForegroundWindow без этого трюка)
     try:
         import ctypes
-        hwnd = int(win.winId())
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        ctypes.windll.user32.SetForegroundWindow(int(win.winId()))
     except Exception:
         pass
 
