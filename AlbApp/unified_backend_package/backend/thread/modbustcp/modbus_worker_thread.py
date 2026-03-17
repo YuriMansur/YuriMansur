@@ -77,41 +77,35 @@ class PLCWorkerThread(QThread):
 
     def stop(self, blocking: bool = True):
         """
-        Корректная остановка потока
-        Thread-safe метод, вызывается из главного потока
-
-        ОПТИМИЗАЦИЯ: Поддержка неблокирующего режима.
-        При blocking=False, метод не ждет завершения потока (не блокирует GUI).
+        Корректная остановка потока.
+        Thread-safe метод, вызывается из главного потока.
 
         Args:
-            blocking: True - блокирующий режим (старый), False - неблокирующий
+            blocking: True - блокирующий режим, False - неблокирующий (не блокирует GUI)
         """
         if self._stopping:
-            return  # Уже в процессе остановки
+            return
 
         self._stopping = True
 
-        # Если подключены, сначала отключаемся
-        if self._connected and self.worker and self.loop:
-            try:
-                # Запускаем async disconnect (НЕ ждем результата в неблокирующем режиме)
-                future = asyncio.run_coroutine_threadsafe(
-                    self._async_disconnect(), self.loop
-                )
-                if blocking:
-                    future.result(timeout=5.0)  # Ждем только в блокирующем режиме
-            except Exception as e:
-                # Логируем ошибку, но продолжаем остановку
-                print(f"[{self.plc_id}] Ошибка при отключении: {e}")
+        if not self.loop or not self.loop.is_running():
+            return
 
-        # Останавливаем event loop
-        if self.loop and self.loop.is_running():
+        if self._connected and self.worker:
+            # disconnect и stop loop — одна корутина, гарантирует порядок
+            future = asyncio.run_coroutine_threadsafe(
+                self._async_disconnect_and_stop(), self.loop
+            )
+            if blocking:
+                try:
+                    future.result(timeout=5.0)
+                except Exception as e:
+                    print(f"[{self.plc_id}] Ошибка при остановке: {e}")
+        else:
             self.loop.call_soon_threadsafe(self.loop.stop)
 
-        # Ждем завершения потока только в блокирующем режиме
         if blocking:
             self.wait()
-            # Cleanup - помечаем поток для удаления Qt
             self.deleteLater()
 
     # ==========================================================================
@@ -235,6 +229,11 @@ class PLCWorkerThread(QThread):
         except Exception as e:
             # Сигнализируем об ошибке
             self.connection_error.emit(str(e))
+
+    async def _async_disconnect_and_stop(self):
+        """Disconnect + остановка loop одной корутиной — гарантирует порядок."""
+        await self._async_disconnect()
+        self.loop.stop()
 
     async def _async_disconnect(self):
         """
