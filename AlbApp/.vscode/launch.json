@@ -2,28 +2,13 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Demo GUI (OpcUaBackend example)",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/unified_backend_package/example_opcua_backend_gui.py",
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}"
-            }
-        },
-        {
-            "name": "Текущий файл",
+            "name": "Python: Current File",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
             "console": "integratedTerminal",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}"
-            }
+            "cwd": "${fileDirname}"
         }
     ]
 }

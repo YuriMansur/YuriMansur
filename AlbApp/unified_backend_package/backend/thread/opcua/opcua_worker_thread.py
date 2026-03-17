@@ -138,7 +138,7 @@ class OpcUaWorkerThread(QThread):
         self.loop.set_debug(False)
 
         # Импортируем здесь, чтобы избежать проблем с импортами
-        from unified_backend_package.backend.worker.opcua.worker.opcua_worker import AsyncOpcUaWorker
+        from unified_backend_package.backend.thread.opcua.worker.opcua_worker import AsyncOpcUaWorker
 
         # Создаем worker с callback для data_updated
         self.worker = AsyncOpcUaWorker(

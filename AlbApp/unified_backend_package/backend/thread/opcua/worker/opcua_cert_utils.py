@@ -6,7 +6,7 @@ opcua_cert_utils — утилиты генерации X.509 сертифика�
 Не является частью runtime-протокола — вызывается один раз при настройке.
 
 Использование:
-    from unified_backend_package.backend.worker.opcua.opcua_cert_utils import (
+    from unified_backend_package.backend.thread.opcua.opcua_cert_utils import (
         generate_self_signed_certificate
     )
 

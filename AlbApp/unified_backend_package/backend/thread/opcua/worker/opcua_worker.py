@@ -5,11 +5,11 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Callable
 from asyncua import Client, Node
 from asyncua.common.subscription import Subscription, DataChangeNotif
-from unified_backend_package.backend.worker.opcua.worker.opcua_security_mixin import SecurityMixin
-from unified_backend_package.backend.worker.opcua.worker.opcua_lifecycle_mixin import LifecycleMixin
-from unified_backend_package.backend.worker.opcua.worker.opcua_events_mixin import EventsMixin
-from unified_backend_package.backend.worker.opcua.worker.opcua_exploration_mixin import ExplorationMixin
-from unified_backend_package.backend.worker.opcua.worker.opcua_config_mixin import ConfigMixin
+from unified_backend_package.backend.thread.opcua.worker.opcua_security_mixin import SecurityMixin
+from unified_backend_package.backend.thread.opcua.worker.opcua_lifecycle_mixin import LifecycleMixin
+from unified_backend_package.backend.thread.opcua.worker.opcua_events_mixin import EventsMixin
+from unified_backend_package.backend.thread.opcua.worker.opcua_exploration_mixin import ExplorationMixin
+from unified_backend_package.backend.thread.opcua.worker.opcua_config_mixin import ConfigMixin
 
 logger = logging.getLogger(__name__)
 

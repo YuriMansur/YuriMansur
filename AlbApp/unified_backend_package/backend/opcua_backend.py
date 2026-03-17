@@ -70,7 +70,7 @@ CALLBACKS:
 
 from typing import Dict, Optional, Callable, Any, List
 from PyQt6.QtCore import QObject, pyqtSignal
-from unified_backend_package.backend.worker.opcua.opcua_worker_thread import OpcUaWorkerThread
+from unified_backend_package.backend.thread.opcua.opcua_worker_thread import OpcUaWorkerThread
 
 
 class OpcUaBackend(QObject):
