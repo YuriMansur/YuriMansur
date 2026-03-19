@@ -18,22 +18,75 @@ def make_valid_identifier(name: str) -> str:
     return re.sub(r'\W|^(?=\d)', '_', name)
 
 
+def make_class_name(raw: str) -> str:
+    """
+    Строит валидное имя класса без ведущего '_'.
+    Если raw начинается с цифры (например IP 192.168.6.6) — добавляет префикс 'Dev_'.
+    """
+    safe = make_valid_identifier(raw)
+    if safe.startswith('_'):
+        safe = 'Dev_' + safe.lstrip('_')
+    return safe
+
+
+def _is_exportable_variable(node_dict: dict) -> bool:
+    """
+    Фильтр узлов для экспорта.
+    Пропускаем:
+      - элементы массива: node_id содержит '[N]' (например bitsInput[15])
+      - узлы-свойства:    node_id содержит '|vprop|' (IndexMax, Dimensions и т.д.)
+    """
+    node_id = node_dict.get("node_id", "")
+    if re.search(r'\[\d+\]', node_id):   # элемент массива
+        return False
+    if '|vprop|' in node_id:             # свойство (метаданные)
+        return False
+    return True
+
+
 def export_variables_from_node(node_dict: dict) -> list:
     variables = []
-    if node_dict["node_class"] == "Variable":
+    if node_dict["node_class"] == "Variable" and _is_exportable_variable(node_dict):
         variables.append({"name": node_dict["browse_name"], "node_id": node_dict["node_id"]})
     for child in node_dict["children"].values():
         variables.extend(export_variables_from_node(child))
     return variables
 
 
-def generate_python_module_from_subtree(node_dict: dict) -> str:
-    variables = export_variables_from_node(node_dict)
-    lines = ["# auto_generated_tags.py", "# Generated OPC UA tags", ""]
-    for var in variables:
-        var_name = make_valid_identifier(var["name"])
-        node_id = var["node_id"]
-        lines.append(f'{var_name} = "{node_id}"')
+def generate_python_class(variables: list, class_name: str) -> str:
+    """
+    Генерирует Python-файл с классом <class_name>_OPC_Tags.
+
+    Пример вывода:
+        class MyDevice_OPC_Tags:
+            Temperature = "ns=2;s=Temperature"
+            Pressure    = "ns=2;s=Pressure"
+    """
+    safe_class = make_class_name(class_name)
+    full_class = f"{safe_class}_OPC_Tags"
+
+    lines = [
+        f"# {full_class}.py",
+        "# Auto-generated OPC UA tag constants",
+        "",
+        f"class {full_class}:",
+    ]
+
+    if not variables:
+        lines.append("    pass")
+    else:
+        for var in variables:
+            attr = make_valid_identifier(var["name"])
+            lines.append(f'    {attr} = "{var["node_id"]}"')
+
+    lines += [
+        "",
+        "",
+        f"# Использование:",
+        f"#   from tags import {full_class}",
+        f"#   backend.read_node(server_id, {full_class}.Temperature)",
+    ]
+
     return "\n".join(lines)
 
 
@@ -390,7 +443,7 @@ class OpcUaScanner(QMainWindow):
         self.log.append(f"✅ JSON сохранён: {path}  ({len(node_list)} узлов)")
 
     def export_python(self):
-        """Сохранить отмеченные галочкой узлы как Python-файл с константами тегов."""
+        """Сохранить отмеченные галочкой узлы как Python-файл с классом <Device>_OPC_Tags."""
         items = self._get_checked_items()
         if not items or not self.scanned_data:
             self.log.append("⚠ Нет отмеченных узлов для экспорта.")
@@ -413,13 +466,16 @@ class OpcUaScanner(QMainWindow):
             self.log.append("⚠ В отмеченных узлах нет переменных (Variable) для экспорта.")
             return
 
-        lines = ["# auto_generated_tags.py", "# Generated OPC UA tags", ""]
-        for var in all_variables:
-            var_name = make_valid_identifier(var["name"])
-            lines.append(f'{var_name} = "{var["node_id"]}"')
-        code = "\n".join(lines)
+        # Имя устройства берём из endpoint: "opc.tcp://192.168.6.6:4840" → "Dev_192_168_6_6"
+        raw = self.endpoint.text().strip()
+        host = re.sub(r'^opc\.tcp://', '', raw).split(':')[0]  # убираем схему и порт
+        device_name = make_class_name(host) or "Device"
 
-        path, _ = QFileDialog.getSaveFileName(self, "Сохранить Python", "", "Python (*.py)")
+        code = generate_python_class(all_variables, device_name)
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить Python", f"{device_name}_OPC_Tags.py", "Python (*.py)"
+        )
         if not path:
             return
 

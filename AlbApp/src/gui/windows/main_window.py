@@ -127,7 +127,8 @@ class MainWindow(QMainWindow):
         page2.setObjectName("trends_page")
         
         # Страница 3: Настройки
-        page3 = SettingsWidget()
+        self.settings_widget = SettingsWidget()
+        page3 = self.settings_widget
         page3.setObjectName("settings_page")
     
         # Добавляем страницы в контейнер

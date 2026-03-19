@@ -1,13 +1,11 @@
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QComboBox, QGroupBox, 
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QComboBox, QGroupBox,
                              QFormLayout, QTextEdit, QPushButton, QHBoxLayout, QTabWidget,
                              QSpinBox, QLineEdit, QCheckBox, QMessageBox)
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt
 import json
-# from tab_wigets.ui_protocol_manager import ProtocolManagerWidget
+from gui.windows.settings_window.tab_wigets.ui_protocol_manager import ProtocolManagerWidget
 
 class SettingsWidget(QWidget):
-    protocol_changed = pyqtSignal(str)
-    
     def __init__(self):
         super().__init__()
         page_layout = QVBoxLayout(self)
@@ -16,9 +14,8 @@ class SettingsWidget(QWidget):
         self.tabs = QTabWidget()
         
         # Вкладка 1: Протокол и конфигурация
-        tab1 =  QWidget()
-        tab1_layout = QVBoxLayout(tab1)
-        tab1_layout.addStretch()
+        self.protocol_widget = ProtocolManagerWidget()
+        tab1 = self.protocol_widget
     
         # Вкладка 2: Логи подключений
         tab2 = QWidget()

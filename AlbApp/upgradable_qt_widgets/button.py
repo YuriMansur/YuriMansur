@@ -1,201 +1,96 @@
-from typing import Optional
-from PyQt6.QtWidgets import QPushButton
-from PyQt6.QtCore import QTimer, QObject, pyqtSignal, pyqtSlot
+from enum import Enum, auto          # Enum — базовый класс перечислений; auto() — автоматическое значение
+from typing import Optional           # Optional[T] = T | None — для аннотации необязательных параметров
+from PyQt6.QtWidgets import QPushButton  # стандартная кнопка Qt — базовый класс
+from PyQt6.QtCore import QTimer, pyqtSignal  # QTimer — таймер повтора в HOLD-режиме; pyqtSignal — объявление сигналов
 
 
-class WriteChannel(QObject):
-    """
-    Канал записи — связывает Qt сигнал с конкретным тегом backend.
-
-    Хранит server_id и node_id внутри себя.
-    Кнопка не знает про адреса — просто подключается к каналу.
-
-    ПРИМЕР:
-    =======
-        channel = WriteChannel(backend, "OPC1", "ns=2;s=Start")
-
-        # Чистое подключение сигнал → слот, без lambda и адресов
-        btn.value_changed.connect(channel.write)
-
-        # Несколько кнопок к одному каналу
-        btn_start.value_changed.connect(channel.write)
-        btn_stop.value_changed.connect(channel.write)
-    """
-
-    def __init__(self, backend, server_id: str, node_id: str, parent=None):
-        super().__init__(parent)
-        self._backend   = backend    # OpcUaBackend
-        self._server_id = server_id  # ID сервера
-        self._node_id   = node_id    # NodeId тега
-
-    @pyqtSlot(int)
-    def write(self, value: int):
-        """Слот для подключения к value_changed(int) кнопки"""
-        self._backend.write_node(self._server_id, self._node_id, value)
-
-    @pyqtSlot(bool)
-    def write_bool(self, value: bool):
-        """Слот для подключения к state_changed(bool) кнопки"""
-        self._backend.write_node(self._server_id, self._node_id, int(value))
-
-    def feedback_to(self, button: "OpcUaButton"):
-        """
-        Возвращает слот для подключения write_completed → подсветка кнопки.
-        Фильтрует по своему node_id — реагирует только на свой тег.
-
-        Использование:
-            backend.write_completed.connect(channel.feedback_to(btn))
-        """
-        server_id = self._server_id  # захватываем в замыкание один раз
-        node_id   = self._node_id
-
-        @pyqtSlot(str, str, bool)
-        def _slot(srv: str, nid: str, success: bool):
-            # Реагируем только на свой сервер + тег — остальные игнорируем
-            if srv == server_id and nid == node_id:
-                button.set_active(success)
-
-        return _slot
-
-# Стиль по умолчанию — без изменений
-_STYLE_DEFAULT = ""
-
-# Стиль активного состояния — зелёный фон, белый текст
-_STYLE_ACTIVE  = "background-color: #2ecc71; color: white;"
+class ButtonMode(Enum):
+    """Режим работы кнопки — передаётся в конструктор OpcUaButton."""
+    CLICK  = auto()  # одиночный клик: emit True один раз при нажатии
+    TOGGLE = auto()  # переключатель: каждый клик инвертирует внутренний флаг
+    HOLD   = auto()  # удержание: emit True пока кнопка зажата, с повтором по таймеру
 
 
 class OpcUaButton(QPushButton):
-    """
-    Универсальная кнопка с двумя режимами и подсветкой состояния.
 
-    СИГНАЛ:
-    =======
-    state_changed(bool) — эмитится при взаимодействии с кнопкой.
-    Подключай к любому слоту снаружи.
+    # Сигналы
+    state_changed = pyqtSignal(bool)  # испускается при любом изменении состояния (True/False)
 
-    РЕЖИМЫ:
-    =======
-    hold=False (по умолчанию) — обычный клик:
-        Клик → state_changed(True)
-
-    hold=True — удержание:
-        Нажатие    → state_changed(True),  повторяет каждые hold_interval мс
-        Отпускание → state_changed(False)
-
-    FEEDBACK:
-    =========
-    set_active(bool) — слот для подсветки и опциональной смены текста.
-
-    ПРИМЕР:
-    =======
-        btn = OpcUaButton("Пуск", hold=True, active_text="Работает")
-
-        # Создаём канал — он хранит адрес тега
-        channel = WriteChannel(backend, "OPC1", "ns=2;s=Start")
-
-        # Чистое Qt подключение — никаких lambda, никаких адресов в GUI
-        btn.value_changed.connect(channel.write)       # int: 1/0
-        btn.state_changed.connect(channel.write_bool)  # bool: True/False
-
-        # Feedback — подсветка кнопки по состоянию
-        backend.write_completed.connect(channel.feedback_to(btn))
-    """
-
-    # bool сигнал — True при нажатии/клике, False при отпускании (hold режим)
-    # Подключай к write_bool() канала или к любому слоту принимающему bool
-    state_changed = pyqtSignal(bool)
-
-    # int сигнал — 1 при нажатии, 0 при отпускании
-    # Подключай к write() канала: btn.value_changed.connect(channel.write)
-    value_changed = pyqtSignal(int)
-
+    # Конструктор
     def __init__(
         self,
-        text: str,                             # текст на кнопке (дефолтное состояние)
-        hold: bool = False,                    # True — режим удержания
-        hold_interval: int = 100,              # интервал повторной отправки при удержании (мс)
-        active_text: Optional[str] = None,     # текст при set_active(True), None — не менять
-        parent=None
+        off_text      : str,                             # текст кнопки в состоянии «выкл» (0 / False)
+        on_text       : Optional[str]  = None,           # текст кнопки в состоянии «вкл»  (1 / True); None — не меняется
+        off_color     : Optional[str]  = None,           # цвет фона в состоянии «выкл»; None — системный цвет
+        on_color      : Optional[str]  = "#2ecc71",      # цвет фона в состоянии «вкл»;  None — системный цвет
+        mode          : ButtonMode     = ButtonMode.CLICK,  # режим работы — по умолчанию одиночный клик
+        hold_interval : int            = 100,            # интервал повтора в мс для HOLD-режима (100 мс = 10 раз/сек)
     ):
-        super().__init__(text, parent)
+        super().__init__(off_text)  # инициализируем QPushButton с текстом
 
-        self._hold         = hold          # флаг режима удержания
-        self._default_text = text          # исходный текст для сброса
-        self._active_text  = active_text   # текст в активном состоянии
+        self._mode         = mode         # сохраняем режим работы
+        self._toggle_state = False        # внутренний флаг TOGGLE: False = выкл, True = вкл
+        self._off_text     = off_text     # текст «выкл»
+        self._on_text      = on_text      # текст «вкл» (None — текст не переключается)
 
-        # Таймер для периодической отправки сигнала при удержании
-        self._timer = QTimer(self)
-        self._timer.setInterval(hold_interval)        # интервал срабатывания
-        self._timer.timeout.connect(self._on_hold_tick)  # слот по таймеру
+        # строим stylesheet-строки из переданных цветов
+        self._style_off = f"background-color: {off_color}; color: white;" if off_color else ""
+        self._style_on  = f"background-color: {on_color};  color: white;" if on_color  else ""
 
-        # Подключаем Qt сигналы кнопки к внутренним слотам
-        self.clicked.connect(self._on_clicked)    # обычный клик
-        self.pressed.connect(self._on_pressed)    # момент нажатия
-        self.released.connect(self._on_released)  # момент отпускания
+        self._timer = QTimer(self)                        # таймер для HOLD-режима; self — родитель, чтобы авто-удалялся
+        self._timer.setInterval(hold_interval)            # устанавливаем интервал повтора
+        self._timer.timeout.connect(self._on_hold_tick)   # каждый тик таймера → _on_hold_tick
 
-    # ------------------------------------------------------------------
-    # Обычный режим (hold=False)
-    # ------------------------------------------------------------------
+        self.clicked.connect(self._on_clicked)    # сигнал clicked  → обработчик клика
+        self.pressed.connect(self._on_pressed)    # сигнал pressed  → обработчик нажатия
+        self.released.connect(self._on_released)  # сигнал released → обработчик отпускания
+
+        self.setStyleSheet(self._style_off)  # применяем начальный стиль сразу
+
+    # ── Обработка событий ─────────────────────────────────────────────────────
 
     def _on_clicked(self):
-        # Срабатывает только в обычном режиме
-        if not self._hold:
-            self.state_changed.emit(True)
-            self.value_changed.emit(1)
-
-    # ------------------------------------------------------------------
-    # Режим удержания (hold=True)
-    # ------------------------------------------------------------------
+        """Вызывается при каждом завершённом клике (pressed + released на кнопке)."""
+        if self._mode == ButtonMode.TOGGLE:              # режим переключателя
+            self._toggle_state = not self._toggle_state  # инвертируем флаг состояния
+            self.state_changed.emit(self._toggle_state)  # сообщаем новое bool-состояние
+        elif self._mode == ButtonMode.CLICK:      # режим одиночного клика
+            self.state_changed.emit(True)         # однократный импульс True
 
     def _on_pressed(self):
-        # Нажатие — эмитим True/1 и запускаем таймер повторения
-        if self._hold:
-            self.state_changed.emit(True)
-            self.value_changed.emit(1)
-            self._timer.start()
+        """Вызывается в момент нажатия кнопки (до отпускания)."""
+        if self._mode == ButtonMode.HOLD:   # только в HOLD-режиме
+            self.state_changed.emit(True)   # немедленный первый импульс True при нажатии
+            self._timer.start()             # запускаем таймер повторов
 
     def _on_hold_tick(self):
-        # Таймер — повторяем True/1 каждые hold_interval мс пока кнопка зажата
-        self.state_changed.emit(True)
-        self.value_changed.emit(1)
+        """Вызывается таймером каждые hold_interval мс пока кнопка удерживается."""
+        self.state_changed.emit(True)  # повторный импульс True
 
     def _on_released(self):
-        # Отпускание — останавливаем таймер и эмитим False/0
-        if self._hold:
-            self._timer.stop()
-            self.state_changed.emit(False)
-            self.value_changed.emit(0)
+        """Вызывается при отпускании кнопки."""
+        if self._mode == ButtonMode.HOLD:   # только в HOLD-режиме
+            self._timer.stop()              # останавливаем таймер повторов
+            self.state_changed.emit(False)  # сообщаем «отпущено» — False
 
-    # ------------------------------------------------------------------
-    # Feedback — подсветка и текст по состоянию
-    # ------------------------------------------------------------------
+    # ── Внешний API ───────────────────────────────────────────────────────────
+
+    def set_online(self, online: bool):
+        """Переключить доступность кнопки (сервер подключён / отключён).
+        При отключении сбрасывает активное состояние."""
+        self.setEnabled(online)
+        if not online:
+            self.set_active(False)
 
     def set_active(self, state: bool):
         """
-        Устанавливает визуальное состояние кнопки.
-        Подключай к любому Qt сигналу через lambda.
-
-        state=True  → зелёный фон + active_text (если задан)
-        state=False → обычный стиль + default_text (если active_text задан)
+        Обновляет визуальное состояние кнопки (цвет + текст).
+        В TOGGLE-режиме синхронизирует внутренний флаг.
         """
-        # Меняем стиль
-        self.setStyleSheet(_STYLE_ACTIVE if state else _STYLE_DEFAULT)
+        if self._mode == ButtonMode.TOGGLE:  # в режиме переключателя синхронизируем внутренний флаг
+            self._toggle_state = state       # чтобы следующий клик отсчитывал от актуального состояния
 
-        # Меняем текст только если active_text был задан
-        if self._active_text is not None:
-            self.setText(self._active_text if state else self._default_text)
+        self.setStyleSheet(self._style_on if state else self._style_off)  # применяем нужный стиль
 
-    def set_state_texts(self, default_text: str, active_text: str):
-        """Задать или изменить тексты для каждого состояния"""
-        self._default_text = default_text  # текст неактивного состояния
-        self._active_text  = active_text   # текст активного состояния
-
-    # ------------------------------------------------------------------
-    # Сеттеры
-    # ------------------------------------------------------------------
-
-    def set_hold_mode(self, enabled: bool):
-        """Переключить режим удержания во время работы"""
-        if self._hold and not enabled:
-            self._timer.stop()  # останавливаем таймер если выключаем hold
-        self._hold = enabled
+        if self._on_text is not None:                                  # если задан текст «вкл»
+            self.setText(self._on_text if state else self._off_text)   # переключаем подпись кнопки
