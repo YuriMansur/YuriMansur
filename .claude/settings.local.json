@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"import sys; sys.path.insert\\(0, ''AlbApp''\\); exec\\(open\\(''AlbApp/unified_backend_package/example_communication_manager.py''\\).read\\(\\).split\\(''def main\\(\\)''\\)[0]\\); print\\(''SUCCESS: Example file imports OK''\\)\")"
-    ]
-  }
-}
