@@ -1,13 +1,15 @@
 import datetime as _dt
-from collections import deque
 import numpy as np
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
-                             QFormLayout, QGroupBox, QColorDialog,
+                             QColorDialog, QFrame,
                              QDateEdit, QTimeEdit, QCheckBox,
-                             QStackedWidget, QHBoxLayout)
+                             QHBoxLayout, QProgressBar,
+                             QLabel, QSpinBox, QWidgetAction)
 from PyQt6.QtCore import Qt, QDateTime, QTimer, QThread, pyqtSignal
+from PyQt6.QtGui import QShortcut, QKeySequence, QAction
 import pyqtgraph as pg
 from influxdb_client import InfluxDBClient
+from protocol_backend.event_bus import bus
 
 def _translate_pg_menus(plot_widget):
     """Переводит контекстное меню pyqtgraph на русский."""
@@ -209,59 +211,66 @@ INFLUX_URL    = "http://localhost:8086"
 INFLUX_TOKEN  = "wWASbkPKK0KKf4_kL6-FXqR5VENQM89VMgjJln1CNfPFBRgvlLkWPcQOU4p_zX2Up0zaWTKw59aQX0mmQ2Gc7Q=="
 INFLUX_ORG    = "Albreht"
 INFLUX_BUCKET = "plc_data"
-LIVE_QUERY_MS    = 300    # интервал запроса новых точек из InfluxDB
-LIVE_RENDER_MS   = 50     # интервал перерисовки (20 fps), не зависит от запроса
+LIVE_RENDER_MS   = 50     # интервал скролла X-оси (20 fps)
 LIVE_WINDOW_SECS = 60     # глубина live-окна (сек)
-MAX_DISPLAY      = 1500   # макс. точек на экране (шаг-прорежка, реальные значения)
+# буфер на 60 с при 4 мс/точку = 15 000 точек; берём с запасом
+MAX_LIVE_POINTS  = 20_000
 
 
-class _QueryWorker(QThread):
-    """Выполняет запрос к InfluxDB в фоновом потоке."""
-    result_ready = pyqtSignal(list, list)
+N_ARCHIVE_WORKERS = 4
 
-    def __init__(self, query: str, parent=None):
+
+class _ArchiveWorker(QThread):
+    """Один параллельный запрос архива — своя часть диапазона."""
+    part_ready = pyqtSignal(int, list, list)   # (idx, times, values)
+
+    def __init__(self, idx: int, query: str, parent=None):
         super().__init__(parent)
+        self._idx   = idx
         self._query = query
 
     def run(self):
+        client = None
         try:
             client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-            tables = client.query_api().query(self._query)
-            client.close()
+            stream = client.query_api().query_stream(self._query)
+            times, values = [], []
+            for record in stream:
+                times.append(record.get_time().timestamp())
+                values.append(record.get_value())
+            self.part_ready.emit(self._idx, times, values)
         except Exception as e:
-            print(f"[TrendsWidget] ошибка запроса: {e}")
-            self.result_ready.emit([], [])
-            return
-
-        records = []
-        for table in tables:
-            records.extend(table.records)
-        records.sort(key=lambda r: r.get_time())
-
-        times  = [r.get_time().timestamp() for r in records]
-        values = [r.get_value()             for r in records]
-        self.result_ready.emit(times, values)
+            print(f"[ArchiveWorker-{self._idx}] ошибка: {e}")
+            self.part_ready.emit(self._idx, [], [])
+        finally:
+            if client:
+                client.close()
 
 
 class TrendsWiget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.current_color = "#e67e22"
+        self.current_color       = "#e67e22"
+        self._mode               = ""
         self._archive_lines: list = []
-        self._live_curve   = None
-        self._query_worker = None
-        self._display_t: deque = deque()   # точки уже на экране
-        self._display_v: deque = deque()
-        self._incoming_t: deque = deque() # получены из БД, ещё не показаны
-        self._incoming_v: deque = deque()
-        self._last_live_ts: float | None = None
+        self._archive_t:     list = []
+        self._archive_v:     list = []
+        self._archive_parts: dict = {}
+        self._archive_workers: list = []
+        self._workers_done       = 0
+        self._live_curve         = None
+        # кольцевой буфер для live-графика
+        self._buf_t     = np.empty(MAX_LIVE_POINTS, dtype=np.float64)
+        self._buf_v     = np.empty(MAX_LIVE_POINTS, dtype=np.float64)
+        self._buf_write = 0
+        self._buf_full  = False
+        self._auto_scroll: bool  = True
+        self._y_range:     tuple = (0.0, 1.0)
+        self._show_points: bool  = False
+        self._line_width:  int   = 1
 
-        # запрос новых точек из БД
-        self._query_timer = QTimer(self)
-        self._query_timer.timeout.connect(self._live_query)
-
-        # рендер — дозированно добавляет точки на экран
+        # таймер плавного скролла X-оси
         self._render_timer = QTimer(self)
         self._render_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._render_timer.timeout.connect(self._render_frame)
@@ -272,40 +281,80 @@ class TrendsWiget(QWidget):
 
     def _setup_ui(self):
         root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(4)
 
         # ── переключатель режимов ────────────────────────────────────────────
-        row_mode = QHBoxLayout()
+        nav_frame = QFrame()
+        nav_frame.setStyleSheet("""
+            QFrame {
+                background-color: #2c3e50;
+                border-bottom: 2px solid #3498db;
+            }
+        """)
+        row_mode = QHBoxLayout(nav_frame)
+        row_mode.setContentsMargins(6, 4, 6, 4)
+        row_mode.setSpacing(6)
+
+        btn_style = """
+            QPushButton {{
+                color: #ecf0f1;
+                background-color: #3d5166;
+                border: 1px solid #4a6278;
+                border-radius: 4px;
+                padding: 4px 16px;
+                font-size: 13px;
+                min-width: 80px;
+            }}
+            QPushButton:checked {{
+                background-color: #3498db;
+                border: 1px solid #2980b9;
+                color: white;
+                font-weight: bold;
+            }}
+            QPushButton:hover:!checked {{
+                background-color: #4a6a82;
+            }}
+        """
         self.btn_live    = QPushButton("● Live")
         self.btn_archive = QPushButton("Архив")
         self.btn_live   .setCheckable(True)
         self.btn_archive.setCheckable(True)
-        self.btn_live.setChecked(True)
+        self.btn_live   .setChecked(True)
+        self.btn_live   .setStyleSheet(btn_style)
+        self.btn_archive.setStyleSheet(btn_style)
         self.btn_live   .clicked.connect(lambda: self._set_mode("live"))
         self.btn_archive.clicked.connect(lambda: self._set_mode("archive"))
         row_mode.addWidget(self.btn_live)
         row_mode.addWidget(self.btn_archive)
         row_mode.addStretch()
-        self.chk_points = QCheckBox("Показывать точки")
-        self.chk_points.toggled.connect(self._toggle_points)
-        row_mode.addWidget(self.chk_points)
-        root.addLayout(row_mode)
+        root.addWidget(nav_frame)
 
-        # ── панели настроек (стек) ───────────────────────────────────────────
-        self.stack = QStackedWidget()
+        # ── панель live ──────────────────────────────────────────────────────
+        self._live_panel = QWidget()
+        live_row = QHBoxLayout(self._live_panel)
+        live_row.setContentsMargins(0, 2, 0, 2)
+        live_row.setSpacing(6)
 
-        # страница 0: live
-        live_group = QGroupBox("Live")
-        live_layout = QFormLayout(live_group)
-        self.color_btn = QPushButton()
-        self.color_btn.setStyleSheet(f"background-color: {self.current_color};")
-        self.color_btn.clicked.connect(self._change_color)
-        live_layout.addRow("Цвет линии:", self.color_btn)
+        self.btn_live_now = QPushButton("▶ В эфир")
+        self.btn_live_now.setFixedHeight(24)
+        self.btn_live_now.clicked.connect(self._resume_autoscroll)
+        live_row.addWidget(self.btn_live_now)
 
-        self.stack.addWidget(live_group)
+        live_row.addStretch()
+        root.addWidget(self._live_panel)
 
-        # страница 1: архив
-        arch_group = QGroupBox("Архив")
-        arch_layout = QVBoxLayout(arch_group)
+        QShortcut(QKeySequence(Qt.Key.Key_Left),  self, self._pan_left)
+        QShortcut(QKeySequence(Qt.Key.Key_Right), self, self._pan_right)
+
+        # ── панель архива ────────────────────────────────────────────────────
+        self._arch_panel = QWidget()
+        arch_layout = QVBoxLayout(self._arch_panel)
+        arch_layout.setContentsMargins(0, 2, 0, 2)
+        arch_layout.setSpacing(2)
+
+        arch_row = QHBoxLayout()
+        arch_row.setSpacing(4)
 
         presets = [
             ("5 мин",  300),
@@ -315,53 +364,80 @@ class TrendsWiget(QWidget):
             ("24 ч",   86400),
             ("7 дн",   604800),
         ]
-        row_presets = QHBoxLayout()
+        self._preset_buttons: list = []
         for label, secs in presets:
             btn = QPushButton(label)
-            btn.setFixedHeight(28)
-            btn.clicked.connect(lambda _, s=secs: self._apply_preset(s))
-            row_presets.addWidget(btn)
-        arch_layout.addLayout(row_presets)
+            btn.setFixedHeight(24)
+            btn.clicked.connect(lambda _, s=secs, b=btn: self._select_preset(s, b))
+            arch_row.addWidget(btn)
+            self._preset_buttons.append(btn)
 
-        manual_layout = QFormLayout()
+        arch_row.addWidget(QLabel("С:"))
         now = QDateTime.currentDateTime()
-
         self.date_from = QDateEdit(now.addSecs(-300).date())
         self.date_from.setDisplayFormat("dd.MM.yyyy")
         self.date_from.setCalendarPopup(True)
-        self.date_from.setMinimumWidth(110)
+        self.date_from.setFixedHeight(24)
         self.time_from = QTimeEdit(now.addSecs(-300).time())
         self.time_from.setDisplayFormat("HH:mm:ss")
-        self.time_from.setMinimumWidth(85)
-        row_from = QHBoxLayout()
-        row_from.addWidget(self.date_from)
-        row_from.addWidget(self.time_from)
-        manual_layout.addRow("С:", row_from)
+        self.time_from.setFixedHeight(24)
+        arch_row.addWidget(self.date_from)
+        arch_row.addWidget(self.time_from)
 
+        arch_row.addWidget(QLabel("По:"))
         self.date_to = QDateEdit(now.date())
         self.date_to.setDisplayFormat("dd.MM.yyyy")
         self.date_to.setCalendarPopup(True)
-        self.date_to.setMinimumWidth(110)
+        self.date_to.setFixedHeight(24)
         self.time_to = QTimeEdit(now.time())
         self.time_to.setDisplayFormat("HH:mm:ss")
-        self.time_to.setMinimumWidth(85)
-        row_to = QHBoxLayout()
-        row_to.addWidget(self.date_to)
-        row_to.addWidget(self.time_to)
-        manual_layout.addRow("По:", row_to)
+        self.time_to.setFixedHeight(24)
+        arch_row.addWidget(self.date_to)
+        arch_row.addWidget(self.time_to)
+
+        for field in (self.date_from, self.time_from, self.date_to, self.time_to):
+            field.dateTimeChanged.connect(lambda _: [b.setStyleSheet(self._PRESET_OFF) for b in self._preset_buttons])
 
         self.btn_load = QPushButton("Загрузить")
+        self.btn_load.setFixedHeight(24)
         self.btn_load.clicked.connect(self._load_archive)
-        manual_layout.addRow(self.btn_load)
-        arch_layout.addLayout(manual_layout)
-        self.stack.addWidget(arch_group)
+        arch_row.addWidget(self.btn_load)
 
-        root.addWidget(self.stack)
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, N_ARCHIVE_WORKERS)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setFormat("%p%")
+        self._progress_bar.setFixedSize(100, 20)
+        self._progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #aaa;
+                border-radius: 3px;
+                background: #f0f0f0;
+                text-align: center;
+                font-size: 11px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #3498db, stop:1 #2ecc71
+                );
+                border-radius: 3px;
+            }
+        """)
+        self._progress_bar.setVisible(False)
+        arch_row.addWidget(self._progress_bar)
+        arch_row.addStretch()
+        arch_layout.addLayout(arch_row)
+
+        self._arch_panel.hide()
+        root.addWidget(self._arch_panel)
 
         # ── график ───────────────────────────────────────────────────────────
         self.plot_widget = pg.PlotWidget(axisItems={"bottom": _TimeAxisItem(orientation="bottom")})
         self.plot_widget.setBackground("w")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_widget.getPlotItem().autoBtn.hide()
         self.plot_widget.addLegend()
         root.addWidget(self.plot_widget, 1)
 
@@ -370,12 +446,15 @@ class TrendsWiget(QWidget):
 
         # поля ручного диапазона оси X → формат ЧЧ:ММ:СС
         _install_x_time_format(self.plot_widget)
+        self._build_graph_context_menu()
 
         self._live_curve = self.plot_widget.plot(
             [], [],
             pen=pg.mkPen(color=self.current_color, width=1),
             name="tenzaSensor (live)",
         )
+        self._live_curve.setDownsampling(auto=True, method='peak')
+        self._live_curve.setClipToView(True)
 
         # ── перекрестие + метка значения ────────────────────────────────────
         dash = pg.mkPen(color="#888888", width=1, style=Qt.PenStyle.DashLine)
@@ -405,196 +484,236 @@ class TrendsWiget(QWidget):
 
         self.plot_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
         self.plot_widget.scene().sigMouseClicked.connect(self._on_mouse_clicked)
+        self.plot_widget.getViewBox().sigRangeChangedManually.connect(self._on_manual_pan)
 
         self._set_mode("live")
 
     # ── режимы ────────────────────────────────────────────────────────────────
 
     def _set_mode(self, mode: str):
+        if mode == self._mode:
+            return
         self._mode = mode
         vb = self.plot_widget.getViewBox()
         if mode == "live":
             self.btn_live   .setChecked(True)
             self.btn_archive.setChecked(False)
-            self.stack.setCurrentIndex(0)
+            self._live_panel.show()
+            self._arch_panel.hide()
             self.plot_widget.setLabel("bottom", "Время")
             self.plot_widget.setLabel("left", "Значение")
             self._clear_archive()
-            self._display_t    = deque()
-            self._display_v    = deque()
-            self._incoming_t   = deque()
-            self._incoming_v   = deque()
-            self._last_live_ts = None
+            self._buf_write   = 0
+            self._buf_full    = False
+            self._y_range     = (0.0, 1.0)
+            self._auto_scroll = True
             self._live_curve.setVisible(True)
-            vb.setAutoVisible(y=True)
-            vb.enableAutoRange(axis='y')
-            self._query_timer .start(LIVE_QUERY_MS)
+            vb.disableAutoRange()
+            vb.setAutoVisible(y=False)
             self._render_timer.start(LIVE_RENDER_MS)
+            bus.tenza_points.connect(self._on_tenza_points)
         else:
             self.btn_live   .setChecked(False)
             self.btn_archive.setChecked(True)
-            self.stack.setCurrentIndex(1)
-            self._query_timer .stop()
+            self._live_panel.hide()
+            self._arch_panel.show()
+            try:
+                bus.tenza_points.disconnect(self._on_tenza_points)
+            except RuntimeError:
+                pass
+            for w in self._archive_workers:
+                w.part_ready.disconnect()
+            self._archive_workers.clear()
             self._render_timer.stop()
+            self._clear_archive()
             self._live_curve.setData([], [])
             self._live_curve.setVisible(False)
+            vb.disableAutoRange()
             vb.enableAutoRange()
 
     # ── live ──────────────────────────────────────────────────────────────────
 
-    def _live_query(self):
-        """300 мс: запускает фоновый запрос только новых точек."""
-        try:
-            if self._query_worker and self._query_worker.isRunning():
-                return
-        except RuntimeError:
-            self._query_worker = None
-        now   = QDateTime.currentDateTimeUtc()
-        dt_to = now.toString("yyyy-MM-ddTHH:mm:ssZ")
-        if self._last_live_ts is not None:
-            last_dt = _dt.datetime.fromtimestamp(self._last_live_ts, tz=_dt.timezone.utc)
-            dt_from = (last_dt + _dt.timedelta(microseconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        else:
-            dt_from = now.addSecs(-LIVE_WINDOW_SECS).toString("yyyy-MM-ddTHH:mm:ssZ")
-        self._run_query(dt_from, dt_to, self._on_live_result)
-
-    def _on_live_result(self, times: list, values: list):
-        """Фоновый поток: складывает новые точки в очередь ожидания."""
-        if not times:
+    def _on_tenza_points(self, times: list, values: list):
+        """Принимает готовые точки напрямую из TenzaProcessor (без InfluxDB)."""
+        if self._mode != "live":
             return
-        pairs = sorted(zip(times, values))
-        initial_load = (self._last_live_ts is None)  # первый запрос — исторические данные
-        for t, v in pairs:
-            self._incoming_t.append(t)
-            self._incoming_v.append(v)
-        self._last_live_ts = pairs[-1][0]
-        if initial_load:
-            # показать все исторические данные сразу, без дрипа
-            self._flush_all_incoming()
+        changed = False
+        for t, v in zip(times, values):
+            self._buf_t[self._buf_write] = t
+            self._buf_v[self._buf_write] = v
+            self._buf_write = (self._buf_write + 1) % MAX_LIVE_POINTS
+            if self._buf_write == 0:
+                self._buf_full = True
+            changed = True
 
-    def _flush_all_incoming(self):
-        """Перенести все накопленные точки на экран немедленно (начальная загрузка)."""
-        cutoff = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() / 1000.0 - LIVE_WINDOW_SECS
-        while self._incoming_t:
-            t = self._incoming_t.popleft()
-            v = self._incoming_v.popleft()
-            if t >= cutoff:
-                self._display_t.append(t)
-                self._display_v.append(v)
-        if self._display_t:
-            x, y = self._decimate(np.array(self._display_t), np.array(self._display_v))
-            self._live_curve.setData(x, y)
+        if changed and (self._buf_full or self._buf_write > 0):
+            self._live_curve.setData(*self._get_buf_data())
+
+    def _get_buf_data(self) -> tuple:
+        """Возвращает (x, y) из кольцевого буфера в хронологическом порядке."""
+        if self._buf_full:
+            w = self._buf_write
+            x = np.concatenate([self._buf_t[w:], self._buf_t[:w]])
+            y = np.concatenate([self._buf_v[w:], self._buf_v[:w]])
+        else:
+            x = self._buf_t[:self._buf_write].copy()
+            y = self._buf_v[:self._buf_write].copy()
+        return x, y
 
     def _render_frame(self):
-        """50 мс: дозированно переносит точки, обновляет кривую только при изменении данных."""
-        data_changed = False
-
-        # добавляем порцию точек из очереди
-        pending = len(self._incoming_t)
-        if pending:
-            batch = max(1, pending * LIVE_RENDER_MS // LIVE_QUERY_MS)
-            for _ in range(min(batch, pending)):
-                self._display_t.append(self._incoming_t.popleft())
-                self._display_v.append(self._incoming_v.popleft())
-            data_changed = True
-
-        # удаляем устаревшие точки
-        cutoff = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() / 1000.0 - LIVE_WINDOW_SECS
-        while self._display_t and self._display_t[0] < cutoff:
-            self._display_t.popleft()
-            self._display_v.popleft()
-            data_changed = True
-
-        if data_changed and self._display_t:
-            x, y = self._decimate(np.array(self._display_t), np.array(self._display_v))
-            self._live_curve.setData(x, y)
-
-        # X-окно = [now-60s, now] — плавный скролл по wall clock, не зависит от прихода данных
+        """50 мс: плавный скролл X-оси + обновление Y-диапазона."""
         now_ts = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() / 1000.0
+
+        if not self._auto_scroll:
+            return
+
         self.plot_widget.setXRange(now_ts - LIVE_WINDOW_SECS, now_ts, padding=0)
+
+        n = MAX_LIVE_POINTS if self._buf_full else self._buf_write
+        if n == 0:
+            return
+        y = self._buf_v[:n]
+        ymin, ymax = float(y.min()), float(y.max())
+        span = (ymax - ymin) or abs(ymax) or 1.0
+        lo, hi = ymin - span * 0.05, ymax + span * 0.05
+        prev_lo, prev_hi = self._y_range
+        prev_span = (prev_hi - prev_lo) or 1.0
+        if abs(lo - prev_lo) / prev_span > 0.05 or abs(hi - prev_hi) / prev_span > 0.05:
+            self.plot_widget.getViewBox().setYRange(lo, hi, padding=0)
+            self._y_range = (lo, hi)
+
+    def _on_manual_pan(self):
+        """Пользователь потащил график мышью — останавливаем авто-скролл."""
+        if self._mode == "live":
+            self._auto_scroll = False
+
+    def _resume_autoscroll(self):
+        """Кнопка '▶ В эфир' — вернуться к текущему времени."""
+        if self._mode == "live":
+            self._auto_scroll = True
+            self._y_range = (0.0, 1.0)
+
+    def _pan_left(self):
+        if self._mode != "live":
+            return
+        vb = self.plot_widget.getViewBox()
+        x0, x1 = vb.viewRange()[0]
+        step = (x1 - x0) * 0.2
+        self._auto_scroll = False
+        self.plot_widget.setXRange(x0 - step, x1 - step, padding=0)
+
+    def _pan_right(self):
+        if self._mode != "live":
+            return
+        vb = self.plot_widget.getViewBox()
+        x0, x1 = vb.viewRange()[0]
+        step = (x1 - x0) * 0.2
+        now_ts = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() / 1000.0
+        self._auto_scroll = False
+        self.plot_widget.setXRange(x0 + step, x1 + step, padding=0)
+
 
     # ── архив ─────────────────────────────────────────────────────────────────
 
-    def _apply_preset(self, secs: int):
+    _PRESET_ON  = "background-color: #1a8fe3; color: white; font-weight: bold;"
+    _PRESET_OFF = ""
+
+    def _select_preset(self, secs: int, active_btn: QPushButton):
         now = QDateTime.currentDateTime()
         frm = now.addSecs(-secs)
+        for field in (self.date_from, self.time_from, self.date_to, self.time_to):
+            field.blockSignals(True)
         self.date_from.setDate(frm.date())
         self.time_from.setTime(frm.time())
         self.date_to.setDate(now.date())
         self.time_to.setTime(now.time())
-        self._load_archive()
+        for field in (self.date_from, self.time_from, self.date_to, self.time_to):
+            field.blockSignals(False)
+        for b in self._preset_buttons:
+            b.setStyleSheet(self._PRESET_ON if b is active_btn else self._PRESET_OFF)
 
     def _load_archive(self):
         qdt_from = QDateTime(self.date_from.date(), self.time_from.time()).toUTC()
-        qdt_to   = QDateTime(self.date_to.date(),   self.time_to.time()  ).toUTC()
-        dt_from  = qdt_from.toString("yyyy-MM-ddTHH:mm:ssZ")
-        dt_to    = qdt_to  .toString("yyyy-MM-ddTHH:mm:ssZ")
+        qdt_to = QDateTime(self.date_to.date(), self.time_to.time()).toUTC()
 
-        duration_s = max(1, qdt_from.secsTo(qdt_to))
-        # точек в диапазоне при 4 мс/сэмпл
-        raw_count  = duration_s * 1000 // 4
-        if raw_count <= MAX_DISPLAY:
-            # коротких данных мало — грузим сырые
-            query = f'''
-from(bucket: "{INFLUX_BUCKET}")
-  |> range(start: {dt_from}, stop: {dt_to})
-  |> filter(fn: (r) => r._measurement == "tenza" and r._field == "value")
-  |> sort(columns: ["_time"])
-'''
-        else:
-            # агрегируем на стороне БД до MAX_DISPLAY точек
-            window_ms = max(4, duration_s * 1000 // MAX_DISPLAY)
-            if window_ms < 1000:
-                every = f"{window_ms}ms"
-            elif window_ms < 60_000:
-                every = f"{window_ms // 1000}s"
-            elif window_ms < 3_600_000:
-                every = f"{window_ms // 60_000}m"
-            else:
-                every = f"{window_ms // 3_600_000}h"
-            query = f'''
-from(bucket: "{INFLUX_BUCKET}")
-  |> range(start: {dt_from}, stop: {dt_to})
-  |> filter(fn: (r) => r._measurement == "tenza" and r._field == "value")
-  |> aggregateWindow(every: {every}, fn: mean, createEmpty: false)
-  |> sort(columns: ["_time"])
-'''
-        worker = _QueryWorker(query, parent=self)
-        worker.result_ready.connect(self._on_archive_result)
-        worker.finished.connect(lambda: setattr(self, "_query_worker", None))
-        self._query_worker = worker
-        worker.start()
+        # отменяем предыдущие воркеры
+        for w in self._archive_workers:
+            w.part_ready.disconnect()
+        self._archive_workers.clear()
 
-    def _on_archive_result(self, times: list, values: list):
-        if not times:
-            return
-        x = np.array(times)
-        y = np.array(values)
+        for b in self._preset_buttons:
+            b.setStyleSheet(self._PRESET_OFF)
         self._clear_archive()
-        pen = pg.mkPen(color=self.current_color, width=1)
-        show_pts = self.chk_points.isChecked()
-        line = self.plot_widget.plot(
-            x, y, pen=pen, name="tenzaSensor (архив)",
-            symbol='o' if show_pts else None,
-            symbolSize=5 if show_pts else 1,
-            symbolBrush=pg.mkBrush(self.current_color) if show_pts else None,
-        )
-        self._archive_lines.append(line)
+        self._archive_parts.clear()
+        self._workers_done = 0
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
+        self.btn_load.setEnabled(False)
+
+        total_ms = qdt_from.msecsTo(qdt_to)
+        step_ms  = total_ms // N_ARCHIVE_WORKERS
+
+        for i in range(N_ARCHIVE_WORKERS):
+            p_from = qdt_from.addMSecs(i * step_ms)
+            p_to   = qdt_from.addMSecs((i + 1) * step_ms) if i < N_ARCHIVE_WORKERS - 1 else qdt_to
+            query  = f'''
+from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: {p_from.toString("yyyy-MM-ddTHH:mm:ssZ")}, stop: {p_to.toString("yyyy-MM-ddTHH:mm:ssZ")})
+  |> filter(fn: (r) => r._measurement == "tenza" and r._field == "value")
+  |> group()
+  |> sort(columns: ["_time"])
+'''
+            worker = _ArchiveWorker(i, query, parent=self)
+            worker.part_ready.connect(self._on_archive_part)
+            worker.finished.connect(self._on_archive_worker_done)
+            self._archive_workers.append(worker)
+
+        for w in self._archive_workers:
+            w.start()
+
+    def _on_archive_part(self, idx: int, times: list, values: list):
+        self._archive_parts[idx] = (times, values)
+        # показываем только последовательные части с начала
+        merged_t, merged_v = [], []
+        for i in range(N_ARCHIVE_WORKERS):
+            if i not in self._archive_parts:
+                break
+            merged_t.extend(self._archive_parts[i][0])
+            merged_v.extend(self._archive_parts[i][1])
+        if not merged_t:
+            return
+        self._archive_t = merged_t
+        self._archive_v = merged_v
+        self._update_archive_curve()
+
+    def _on_archive_worker_done(self):
+        self._workers_done += 1
+        self._progress_bar.setValue(self._workers_done)
+        if self._workers_done == N_ARCHIVE_WORKERS:
+            self._archive_workers.clear()
+            self._progress_bar.setVisible(False)
+            self.btn_load.setEnabled(True)
+
+    def _update_archive_curve(self):
+        x = np.array(self._archive_t)
+        y = np.array(self._archive_v)
+        w        = self._line_width
+        pen      = pg.mkPen(color=self.current_color, width=w)
+        show_pts = self._show_points
+        if self._archive_lines:
+            self._archive_lines[0].setData(x, y)
+        else:
+            line = self.plot_widget.plot(
+                x, y, pen=pen, name="tenzaSensor (архив)",
+                symbol='o' if show_pts else None,
+                symbolSize=5 if show_pts else 1,
+                symbolBrush=pg.mkBrush(self.current_color) if show_pts else None,
+            )
+            line.setDownsampling(auto=True, method='peak')
+            line.setClipToView(True)
+            self._archive_lines.append(line)
 
     # ── InfluxDB (фоновый поток) ───────────────────────────────────────────────
-
-    def _run_query(self, dt_from: str, dt_to: str, callback):
-        query = f'''
-from(bucket: "{INFLUX_BUCKET}")
-  |> range(start: {dt_from}, stop: {dt_to})
-  |> filter(fn: (r) => r._measurement == "tenza" and r._field == "value")
-  |> sort(columns: ["_time"])
-'''
-        worker = _QueryWorker(query, parent=self)
-        worker.result_ready.connect(callback)
-        worker.finished.connect(lambda: setattr(self, "_query_worker", None))
-        self._query_worker = worker
-        worker.start()
 
     # ── перекрестие и подсказка ───────────────────────────────────────────────
 
@@ -665,9 +784,44 @@ from(bucket: "{INFLUX_BUCKET}")
 
     # ── вспомогательное ───────────────────────────────────────────────────────
 
+    def _build_graph_context_menu(self):
+        """Добавить пункты настройки линии в контекстное меню графика (ПКМ)."""
+        menu = self.plot_widget.getViewBox().menu
+        menu.addSeparator()
+
+        # Показать / скрыть точки
+        self._action_points = QAction("Показать точки", menu)
+        self._action_points.setCheckable(True)
+        self._action_points.setChecked(False)
+        self._action_points.toggled.connect(self._toggle_points)
+        menu.addAction(self._action_points)
+
+        # Цвет линии
+        action_color = QAction("Цвет линии...", menu)
+        action_color.triggered.connect(self._change_color)
+        menu.addAction(action_color)
+
+        # Толщина линии — виджет внутри меню
+        width_container = QWidget()
+        width_layout = QHBoxLayout(width_container)
+        width_layout.setContentsMargins(20, 4, 8, 4)
+        width_layout.setSpacing(6)
+        width_layout.addWidget(QLabel("Толщина линии:"))
+        spin = QSpinBox()
+        spin.setRange(1, 10)
+        spin.setValue(self._line_width)
+        spin.setFixedWidth(52)
+        spin.valueChanged.connect(self._change_line_width)
+        width_layout.addWidget(spin)
+        width_action = QWidgetAction(menu)
+        width_action.setDefaultWidget(width_container)
+        menu.addAction(width_action)
+
     def _toggle_points(self, checked: bool):
-        sym  = 'o' if checked else None
-        size = 5   if checked else 1
+        self._show_points = checked
+        self._action_points.setText("Скрыть точки" if checked else "Показать точки")
+        sym   = 'o' if checked else None
+        size  = 5   if checked else 1
         brush = pg.mkBrush(self.current_color)
         for curve in [self._live_curve] + self._archive_lines:
             if curve is None:
@@ -676,27 +830,26 @@ from(bucket: "{INFLUX_BUCKET}")
             curve.setSymbolSize(size)
             curve.setSymbolBrush(brush)
 
-    @staticmethod
-    def _decimate(x: np.ndarray, y: np.ndarray) -> tuple:
-        """Равномерная прорежка до MAX_DISPLAY точек: x[::step].
-        Значения реальные (не усредняются), шаг стабилен для одного объёма данных."""
-        n = len(x)
-        if n <= MAX_DISPLAY:
-            return x, y
-        step = max(1, n // MAX_DISPLAY)
-        return x[::step], y[::step]
-
     def _clear_archive(self):
         for line in self._archive_lines:
             self.plot_widget.removeItem(line)
         self._archive_lines.clear()
+        self._archive_t.clear()
+        self._archive_v.clear()
 
     def _change_color(self):
         color = QColorDialog.getColor()
         if color.isValid():
             self.current_color = color.name()
-            self.color_btn.setStyleSheet(f"background-color: {self.current_color};")
-            self._live_curve.setPen(pg.mkPen(color=self.current_color, width=1))
+            for curve in [self._live_curve] + self._archive_lines:
+                if curve is not None:
+                    curve.setPen(pg.mkPen(color=self.current_color, width=self._line_width))
+
+    def _change_line_width(self, width: int):
+        self._line_width = width
+        for curve in [self._live_curve] + self._archive_lines:
+            if curve is not None:
+                curve.setPen(pg.mkPen(color=self.current_color, width=width))
 
     def set_labels(self, x_label="X", y_label="Y"):
         self.plot_widget.setLabel("bottom", x_label)

@@ -15,3 +15,9 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code
+.claude/
+
+# InfluxDB binary (too large for GitHub)
+influxdb/
