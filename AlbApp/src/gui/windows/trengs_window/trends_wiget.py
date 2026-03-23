@@ -1,13 +1,14 @@
 import datetime as _dt
 import numpy as np
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
-                             QColorDialog, QFrame,
+                             QColorDialog, QFileDialog, QFrame,
                              QDateEdit, QTimeEdit, QCheckBox,
                              QHBoxLayout, QProgressBar,
                              QLabel, QSpinBox, QWidgetAction)
 from PyQt6.QtCore import Qt, QDateTime, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QShortcut, QKeySequence, QAction
 import pyqtgraph as pg
+pg.setConfigOptions(antialias=True)
 from influxdb_client import InfluxDBClient
 from protocol_backend.event_bus import bus
 
@@ -17,27 +18,47 @@ def _translate_pg_menus(plot_widget):
     m  = vb.menu   # ViewBoxMenu
 
     # ── ViewBox: верхний уровень ──────────────────────────────
-    m.viewAll.setText("Показать всё")
+    m.viewAll.setVisible(False)
     m.mouseModes[0].setText("3 кнопки (панорама)")
     m.mouseModes[1].setText("1 кнопка (выделение)")
 
-    # ── ViewBox: подменю осей и режима мыши ──────────────────
-    _sub_ru = {"X axis": "Ось X", "Y axis": "Ось Y", "Mouse Mode": "Режим мыши"}
+    # Режим мыши: 3 кнопки (панорама) по умолчанию, убрать из меню
+    vb.setMouseMode(pg.ViewBox.PanMode)
+
+    # ── ViewBox: подменю осей → перенести в "Масштаб" ────────
+    _sub_ru = {"X axis": "Ось X", "Y axis": "Ось Y"}
+    axis_actions = []
     for action in m.actions():
-        if action.menu() and action.text() in _sub_ru:
-            action.menu().setTitle(_sub_ru[action.text()])
-        # Export... встречается прямо в меню ViewBox (без подменю)
-        if action.text().replace("&", "") in ("Export...", "Export"):
-            action.setText("Экспорт...")
+        if action.menu():
+            if action.text() in _sub_ru:
+                ru_title = _sub_ru[action.text()]
+                action.menu().setTitle(ru_title)
+                axis_actions.append((action, ru_title))
+            elif action.text() in ("Mouse Mode", "Режим мыши"):
+                action.setVisible(False)
+
+    scale_menu = m.addMenu("Масштаб")
+    for action, ru_title in axis_actions:
+        m.removeAction(action)
+        action.setText(ru_title)
+        scale_menu.addAction(action)
+
+    # Скрываем стандартный Export pyqtgraph при каждом открытии меню
+    def _hide_default_export():
+        for action in m.actions():
+            txt = action.text().replace("&", "")
+            if txt in ("Export...", "Export"):
+                action.setVisible(False)
+    m.aboutToShow.connect(_hide_default_export)
 
     # ── ViewBox: форм-виджеты осей (X=ctrl[0], Y=ctrl[1]) ────
     for ui in m.ctrl:
         ui.autoRadio       .setText("Авто")
         ui.manualRadio     .setText("Вручную")
-        ui.invertCheck     .setText("Инвертировать ось")
-        ui.mouseCheck      .setText("Управление мышью")
-        ui.visibleOnlyCheck.setText("Только видимые данные")
-        ui.autoPanCheck    .setText("Только авто-сдвиг")
+        ui.invertCheck     .setVisible(False)
+        ui.mouseCheck      .setVisible(False)
+        ui.visibleOnlyCheck.setVisible(False)
+        ui.autoPanCheck    .setVisible(False)
         ui.label           .setText("Привязать к:")
 
     # ── PlotItem: меню "Plot Options" и его подменю ───────────
@@ -45,7 +66,7 @@ def _translate_pg_menus(plot_widget):
     if not (hasattr(pi, "ctrlMenu") and pi.ctrlMenu):
         return
 
-    pi.ctrlMenu.setTitle("Параметры графика")
+    pi.ctrlMenu.menuAction().setVisible(False)
 
     _submenu_ru = {
         "Transforms": "Преобразования",
@@ -53,35 +74,19 @@ def _translate_pg_menus(plot_widget):
         "Average":    "Усреднение",
         "Alpha":      "Прозрачность",
         "Grid":       "Сетка",
-        "Points":     "Точки",
-        "Export...":  "Экспорт...",
-        "Export":     "Экспорт",
     }
+    _hidden = {"Points", "Alpha", "Grid", "Average", "Transforms", "Downsample"}
     for action in pi.ctrlMenu.actions():
-        if action.text() in _submenu_ru:
+        key = action.text().replace("&", "")
+        if key in _hidden:
+            action.setVisible(False)
+            continue
+        if key in _submenu_ru:
             if action.menu():
-                action.menu().setTitle(_submenu_ru[action.text()])
+                action.menu().setTitle(_submenu_ru[key])
             else:
-                action.setText(_submenu_ru[action.text()])
+                action.setText(_submenu_ru[key])
 
-    # ── Диалог экспорта — переводим при первом открытии ──────
-    def _on_export_triggered(pi=pi):
-        from PyQt6.QtCore import QTimer as _QTimer
-        def _do_translate():
-            dlg = getattr(pi, "exportDialog", None)
-            if dlg is None:
-                return
-            dlg.setWindowTitle("Экспорт")
-            ui = dlg.ui
-            if hasattr(ui, "exportBtn"): ui.exportBtn.setText("Экспорт")
-            if hasattr(ui, "closeBtn"):  ui.closeBtn .setText("Закрыть")
-            if hasattr(ui, "copyBtn"):   ui.copyBtn  .setText("Копировать")
-        _QTimer.singleShot(50, _do_translate)
-
-    for action in pi.ctrlMenu.actions():
-        txt = action.text().replace("&", "")
-        if txt in ("Export...", "Export"):
-            action.triggered.connect(_on_export_triggered)
 
     # ── PlotItem: форм-виджеты внутри подменю ────────────────
     c = pi.ctrl
@@ -118,6 +123,21 @@ def _translate_pg_menus(plot_widget):
     c.averageGroup.setTitle("Усреднение")
     c.pointsGroup .setTitle("Точки")
     c.alphaGroup  .setTitle("Прозрачность")
+
+    # ── Свой CSV-экспорт в самом низу меню (скрыт по умолчанию) ──
+    sep_action = m.addSeparator()
+    csv_action = QAction("Экспорт в CSV", m)
+    csv_action.setVisible(False)
+    m.addAction(csv_action)
+
+    def _keep_at_bottom():
+        m.removeAction(sep_action)
+        m.removeAction(csv_action)
+        m.addAction(sep_action)
+        m.addAction(csv_action)
+    m.aboutToShow.connect(_keep_at_bottom)
+
+    return csv_action
 
 
 def _install_x_time_format(plot_widget):
@@ -269,6 +289,7 @@ class TrendsWiget(QWidget):
         self._y_range:     tuple = (0.0, 1.0)
         self._show_points: bool  = False
         self._line_width:  int   = 1
+        self._line_alpha:  int   = 255
 
         # таймер плавного скролла X-оси
         self._render_timer = QTimer(self)
@@ -335,11 +356,6 @@ class TrendsWiget(QWidget):
         live_row = QHBoxLayout(self._live_panel)
         live_row.setContentsMargins(0, 2, 0, 2)
         live_row.setSpacing(6)
-
-        self.btn_live_now = QPushButton("▶ В эфир")
-        self.btn_live_now.setFixedHeight(24)
-        self.btn_live_now.clicked.connect(self._resume_autoscroll)
-        live_row.addWidget(self.btn_live_now)
 
         live_row.addStretch()
         root.addWidget(self._live_panel)
@@ -437,12 +453,15 @@ class TrendsWiget(QWidget):
         self.plot_widget = pg.PlotWidget(axisItems={"bottom": _TimeAxisItem(orientation="bottom")})
         self.plot_widget.setBackground("w")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_widget.getPlotItem().autoBtn.hide()
+        _auto_btn = self.plot_widget.getPlotItem().autoBtn
+        _auto_btn.hide()
+        _auto_btn.show = lambda: None  # запретить pyqtgraph показывать кнопку
         self.plot_widget.addLegend()
         root.addWidget(self.plot_widget, 1)
 
         # перевод контекстного меню
-        _translate_pg_menus(self.plot_widget)
+        self._csv_export_action = _translate_pg_menus(self.plot_widget)
+        self._csv_export_action.triggered.connect(self._export_csv)
 
         # поля ручного диапазона оси X → формат ЧЧ:ММ:СС
         _install_x_time_format(self.plot_widget)
@@ -495,6 +514,7 @@ class TrendsWiget(QWidget):
             return
         self._mode = mode
         vb = self.plot_widget.getViewBox()
+        self._csv_export_action.setVisible(mode == "archive")
         if mode == "live":
             self.btn_live   .setChecked(True)
             self.btn_archive.setChecked(False)
@@ -725,17 +745,8 @@ from(bucket: "{INFLUX_BUCKET}")
             return
 
         mp = self.plot_widget.getPlotItem().vb.mapSceneToView(pos)
-        xs, ys = self._get_visible_data()
-        if xs is None or len(xs) == 0:
-            return
-
-        idx = int(np.searchsorted(xs, mp.x()))
-        idx = np.clip(idx, 0, len(xs) - 1)
-        if idx > 0 and abs(xs[idx - 1] - mp.x()) < abs(xs[idx] - mp.x()):
-            idx -= 1
-
-        self._vline.setPos(xs[idx])
-        self._hline.setPos(ys[idx])
+        self._vline.setPos(mp.x())
+        self._hline.setPos(mp.y())
         self._vline.setVisible(True)
         self._hline.setVisible(True)
 
@@ -744,6 +755,11 @@ from(bucket: "{INFLUX_BUCKET}")
         if event.button() == Qt.MouseButton.RightButton:
             self._click_marker.setVisible(False)
             self._click_label.setVisible(False)
+            return
+
+        # двойной клик — вернуться в эфир (live режим)
+        if event.double():
+            self._resume_autoscroll()
             return
 
         pos = event.scenePos()
@@ -785,37 +801,96 @@ from(bucket: "{INFLUX_BUCKET}")
     # ── вспомогательное ───────────────────────────────────────────────────────
 
     def _build_graph_context_menu(self):
-        """Добавить пункты настройки линии в контекстное меню графика (ПКМ)."""
+        """Добавить подменю 'Линия' в контекстное меню графика (ПКМ)."""
+        from PyQt6.QtWidgets import QSlider
         menu = self.plot_widget.getViewBox().menu
         menu.addSeparator()
 
-        # Показать / скрыть точки
-        self._action_points = QAction("Показать точки", menu)
-        self._action_points.setCheckable(True)
-        self._action_points.setChecked(False)
-        self._action_points.toggled.connect(self._toggle_points)
-        menu.addAction(self._action_points)
+        line_menu = menu.addMenu("Линия")
 
-        # Цвет линии
-        action_color = QAction("Цвет линии...", menu)
+        # Цвет
+        action_color = QAction("Цвет...", line_menu)
         action_color.triggered.connect(self._change_color)
-        menu.addAction(action_color)
+        line_menu.addAction(action_color)
 
-        # Толщина линии — виджет внутри меню
-        width_container = QWidget()
-        width_layout = QHBoxLayout(width_container)
-        width_layout.setContentsMargins(20, 4, 8, 4)
-        width_layout.setSpacing(6)
-        width_layout.addWidget(QLabel("Толщина линии:"))
+        # Толщина — спинбокс
+        width_w = QWidget()
+        width_l = QHBoxLayout(width_w)
+        width_l.setContentsMargins(16, 4, 8, 4)
+        width_l.setSpacing(6)
+        width_l.addWidget(QLabel("Толщина:"))
         spin = QSpinBox()
         spin.setRange(1, 10)
         spin.setValue(self._line_width)
         spin.setFixedWidth(52)
         spin.valueChanged.connect(self._change_line_width)
-        width_layout.addWidget(spin)
-        width_action = QWidgetAction(menu)
-        width_action.setDefaultWidget(width_container)
-        menu.addAction(width_action)
+        width_l.addWidget(spin)
+        wa = QWidgetAction(line_menu)
+        wa.setDefaultWidget(width_w)
+        line_menu.addAction(wa)
+
+        # Прозрачность — слайдер 0–100 %
+        alpha_w = QWidget()
+        alpha_l = QHBoxLayout(alpha_w)
+        alpha_l.setContentsMargins(16, 4, 8, 4)
+        alpha_l.setSpacing(6)
+        alpha_l.addWidget(QLabel("Прозрачность:"))
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(100)
+        slider.setFixedWidth(90)
+        slider.valueChanged.connect(self._change_opacity)
+        alpha_l.addWidget(slider)
+        aa = QWidgetAction(line_menu)
+        aa.setDefaultWidget(alpha_w)
+        line_menu.addAction(aa)
+
+        # Показать / скрыть точки
+        line_menu.addSeparator()
+        self._action_points = QAction("Показать точки", line_menu)
+        self._action_points.setCheckable(True)
+        self._action_points.toggled.connect(self._toggle_points)
+        line_menu.addAction(self._action_points)
+
+        # Сетка в корне меню
+        menu.addSeparator()
+        grid_menu = menu.addMenu("Сетка")
+        act_grid_x = QAction("По X", grid_menu)
+        act_grid_x.setCheckable(True)
+        act_grid_x.setChecked(True)
+        act_grid_y = QAction("По Y", grid_menu)
+        act_grid_y.setCheckable(True)
+        act_grid_y.setChecked(True)
+        def _update_grid():
+            self.plot_widget.showGrid(x=act_grid_x.isChecked(), y=act_grid_y.isChecked(), alpha=0.3)
+        grid_alpha_val = [0.3]
+
+        def _update_grid():
+            self.plot_widget.showGrid(x=act_grid_x.isChecked(), y=act_grid_y.isChecked(), alpha=grid_alpha_val[0])
+
+        act_grid_x.toggled.connect(lambda _: _update_grid())
+        act_grid_y.toggled.connect(lambda _: _update_grid())
+        grid_menu.addAction(act_grid_x)
+        grid_menu.addAction(act_grid_y)
+
+        grid_menu.addSeparator()
+        alpha_gw = QWidget()
+        alpha_gl = QHBoxLayout(alpha_gw)
+        alpha_gl.setContentsMargins(16, 4, 8, 4)
+        alpha_gl.setSpacing(6)
+        alpha_gl.addWidget(QLabel("Прозрачность:"))
+        grid_slider = QSlider(Qt.Orientation.Horizontal)
+        grid_slider.setRange(0, 100)
+        grid_slider.setValue(30)
+        grid_slider.setFixedWidth(90)
+        def _on_grid_alpha(v):
+            grid_alpha_val[0] = v / 100.0
+            _update_grid()
+        grid_slider.valueChanged.connect(_on_grid_alpha)
+        alpha_gl.addWidget(grid_slider)
+        alpha_ga = QWidgetAction(grid_menu)
+        alpha_ga.setDefaultWidget(alpha_gw)
+        grid_menu.addAction(alpha_ga)
 
     def _toggle_points(self, checked: bool):
         self._show_points = checked
@@ -837,19 +912,55 @@ from(bucket: "{INFLUX_BUCKET}")
         self._archive_t.clear()
         self._archive_v.clear()
 
+    def _make_pen(self):
+        from PyQt6.QtGui import QColor
+        c = QColor(self.current_color)
+        c.setAlpha(self._line_alpha)
+        return pg.mkPen(color=c, width=self._line_width)
+
+    def _apply_pen(self):
+        pen = self._make_pen()
+        for curve in [self._live_curve] + self._archive_lines:
+            if curve is not None:
+                curve.setPen(pen)
+
     def _change_color(self):
         color = QColorDialog.getColor()
         if color.isValid():
             self.current_color = color.name()
-            for curve in [self._live_curve] + self._archive_lines:
-                if curve is not None:
-                    curve.setPen(pg.mkPen(color=self.current_color, width=self._line_width))
+            self._apply_pen()
+
+    def _change_opacity(self, value: int):
+        self._line_alpha = int(value * 2.55)
+        self._apply_pen()
 
     def _change_line_width(self, width: int):
         self._line_width = width
-        for curve in [self._live_curve] + self._archive_lines:
-            if curve is not None:
-                curve.setPen(pg.mkPen(color=self.current_color, width=width))
+        self._apply_pen()
+
+    def _export_csv(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить CSV", "", "CSV файлы (*.csv)"
+        )
+        if not path:
+            return
+        xs, ys = self._get_visible_data()
+        if xs is None or len(xs) == 0:
+            return
+        def _rfc3339(ts):
+            dt = _dt.datetime.fromtimestamp(ts).astimezone()
+            off = dt.strftime("%z")          # +0300
+            off_fmt = off[:3] + ":" + off[3:]  # +03:00
+            return dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + off_fmt
+        t_start = _rfc3339(xs[0])
+        t_stop  = _rfc3339(xs[-1])
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            f.write("#group,false,false,true,true,false,false,true,true,true\n")
+            f.write("#datatype,string,long,dateTime:RFC3339,dateTime:RFC3339,dateTime:RFC3339,double,string,string,string\n")
+            f.write("#default,_result,,,,,,,,\n")
+            f.write(",result,table,_start,_stop,_time,_value,_field,_measurement,server\n")
+            for t, v in zip(xs, ys):
+                f.write(f",,0,{t_start},{t_stop},{_rfc3339(t)},{v},value,tenza,PLC1\n")
 
     def set_labels(self, x_label="X", y_label="Y"):
         self.plot_widget.setLabel("bottom", x_label)
