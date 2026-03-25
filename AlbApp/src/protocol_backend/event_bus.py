@@ -35,7 +35,11 @@ class EventBus(QObject):
     tenza_array_updated = pyqtSignal(list)
 
     # TenzaProcessor → TrendsWidget (готовые точки для live-графика)
-    tenza_points = pyqtSignal(list, list)  # (timestamps: list[float], values: list[float])
+    tenza_points        = pyqtSignal(list, list)  # (timestamps: list[float], values: list[float])
+    # DisplacementProcessor → TrendsWidget
+    displacement_points = pyqtSignal(list, list)  # (timestamps: list[float], values: list[float])
+    # ServerManager → TrendsWidget (подписка на уставку)
+    nowSetpoint_points  = pyqtSignal(list, list)  # (timestamps: list[float], values: list[float])
 
 
 bus = EventBus()

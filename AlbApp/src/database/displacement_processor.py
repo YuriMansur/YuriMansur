@@ -1,7 +1,7 @@
 """
-tenza_processor.py — обработчик данных тензодатчиков.
+displacement_processor.py — обработчик данных датчика перемещения.
 
-Слушает bus.data_updated, накапливает cc и массив,
+Аналог TenzaProcessor: слушает bus.data_updated, накапливает cc и массив,
 вычисляет окно [prev_cc : cc] с учётом кольцевого буфера,
 пишет в InfluxDB без участия GUI.
 """
@@ -17,7 +17,7 @@ from protocol_backend.tags.tags import Dev_192_168_6_6_OPC_Tags as Tags
 ARRAY_SIZE = 50
 
 
-class TenzaProcessor(QObject):
+class DisplacementProcessor(QObject):
 
     def __init__(self, write_api, bucket: str, org: str, parent=None):
         super().__init__(parent)
@@ -30,19 +30,16 @@ class TenzaProcessor(QObject):
         self._prev_cc:     int             = -1
         self._srv:         str             = ""
         self._last_ts: datetime | None     = None
-        self.logging:  bool                = True   # переключить снаружи для остановки лога
+        self.logging:  bool                = True
 
-        # Флаги готовности данных текущего опроса
         self._new_array:   bool            = False
         self._new_cc:      bool            = False
         self._batch_ts:    datetime | None = None   # время получения cc текущего цикла
 
-        self._nowsetpoint: float | None    = None   # последнее известное значение уставки
-
         # Подключение управляется снаружи (InfluxLogger)
 
     def _on_data(self, srv: str, nid: str, val):
-        if nid == Tags.tenzaSensorDataArr:
+        if nid == Tags.displacementSensorArr:
             self._array     = list(val) if val else []
             self._srv       = srv
             self._new_array = True
@@ -52,8 +49,6 @@ class TenzaProcessor(QObject):
             self._batch_ts = datetime.now(timezone.utc)
             self._new_cc   = True
             self._try_flush()
-        elif nid == Tags.nowSetpoint:
-            self._nowsetpoint = float(val)
 
     def _on_disconnect(self, _srv: str):
         """При разрыве сбрасываем счётчик — первый батч после реконнекта пропускаем."""
@@ -74,7 +69,6 @@ class TenzaProcessor(QObject):
             return
 
         if self._prev_cc == -1:
-            # первый цикл — нет истории, просто запоминаем
             self._prev_cc = self._cc
             return
 
@@ -86,9 +80,8 @@ class TenzaProcessor(QObject):
         prev = self._prev_cc
 
         if prev == curr:
-            return  # ПЛК не продвинулся
+            return
 
-        # собрать индексы от prev+1 до curr включительно (кольцевой)
         indices = []
         i = (prev + 1) % ARRAY_SIZE
         while True:
@@ -102,21 +95,21 @@ class TenzaProcessor(QObject):
         # Если окно охватывает весь буфер — cc прыгнул через полный оборот
         # (реконнект, пропуск цикла). Данные ненадёжны — пропускаем батч.
         if len(indices) >= ARRAY_SIZE:
-            print(f"[tenza] cc leap (prev={prev}, curr={curr}), skipping")
+            print(f"[displacement] cc leap (prev={prev}, curr={curr}), skipping")
             return
 
         step = timedelta(milliseconds=4)
         if self._last_ts is None:
             self._last_ts = self._batch_ts
         else:
-            self._last_ts += step  # следующий элемент сразу за предыдущим батчем
+            self._last_ts += step
 
         points = []
         for i, idx in enumerate(indices):
             if idx >= len(self._array):
                 continue
             point = (
-                Point("tenza")
+                Point("displacement")
                 .tag("server", srv)
                 .field("value", float(self._array[idx]))
                 .time(self._last_ts + step * i, WritePrecision.NS)
@@ -127,31 +120,15 @@ class TenzaProcessor(QObject):
             self._last_ts = self._last_ts + step * (len(points) - 1)
 
         if points:
-            all_points = list(points)
-
-            # записать nowSetpoint одной точкой в момент батча
-            if self._nowsetpoint is not None:
-                sp_ts = self._last_ts
-                sp_point = (
-                    Point("nowSetpoint")
-                    .tag("server", srv)
-                    .field("value", self._nowsetpoint)
-                    .time(sp_ts, WritePrecision.NS)
-                )
-                all_points.append(sp_point)
-
             try:
-                self._write_api.write(bucket=self._bucket, org=self._org, record=all_points)
+                self._write_api.write(bucket=self._bucket, org=self._org, record=points)
                 if self.logging:
                     vals = [float(self._array[idx]) for idx in indices if idx < len(self._array)]
-                    print(f"[DB] cc={self._cc} prev={self._prev_cc} n={len(vals)} values={vals}")
+                    print(f"[DB displacement] cc={self._cc} prev={self._prev_cc} n={len(vals)} values={vals}")
             except Exception as e:
-                print(f"[TenzaProcessor] ошибка записи: {e}")
+                print(f"[DisplacementProcessor] ошибка записи: {e}")
                 self._last_ts = None  # следующий батч стартует от реального времени
 
             times = [p._time.timestamp() for p in points]
             vals  = [p._fields["value"]   for p in points]
-            bus.tenza_points.emit(times, vals)
-
-            if self._nowsetpoint is not None:
-                bus.nowSetpoint_points.emit([sp_ts.timestamp()], [self._nowsetpoint])
+            bus.displacement_points.emit(times, vals)

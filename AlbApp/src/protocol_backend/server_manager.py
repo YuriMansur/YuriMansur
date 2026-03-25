@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timezone
 from PyQt6.QtCore import QObject, QTimer
 from protocol_backend.backend.opcua_backend import OpcUaBackend
 from protocol_backend.event_bus import bus
@@ -12,6 +13,7 @@ _PLC1_TAGS = [
     Tags.cmdBackwardJogging,
     Tags.cmdPowerOn,
     Tags.cmdPowerOff,
+    Tags.nowSetpoint,       # подписка на текущую уставку
 ]
 
 # ── Конфигурация серверов ─────────────────────────────────────────────────────
@@ -23,7 +25,7 @@ _SERVERS = [
         "reconnect_interval": 5,
         "subscribe"         : _PLC1_TAGS,  # подписка + начальное чтение при подключении
         "polls"             : [
-            {"name": "arrays", "nodes": [Tags.cc, Tags.tenzaSensorDataArr], "interval": 0.1, "sequential": True},
+            {"name": "arrays", "nodes": [Tags.cc, Tags.displacementSensorArr, Tags.tenzaSensorDataArr], "interval": 0.1, "sequential": True},
         ],
     },
 ]
@@ -158,6 +160,9 @@ class ServerManager(QObject):
         Tags.cmdPowerOn:           lambda v: bus.state_power_on      .emit(bool(v)),
         Tags.cmdPowerOff:          lambda v: bus.state_power_off     .emit(bool(v)),
         Tags.tenzaSensorDataArr:   lambda v: bus.tenza_array_updated .emit(list(v) if v else []),
+        Tags.nowSetpoint:          lambda v: bus.nowSetpoint_points  .emit(
+            [datetime.now(timezone.utc).timestamp()], [float(v)]
+        ),
     }
 
     def _emit_state(self, nid: str, val):

@@ -1,295 +1,121 @@
-import datetime as _dt
-import numpy as np
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
-                             QColorDialog, QFileDialog, QFrame,
-                             QDateEdit, QTimeEdit, QCheckBox,
-                             QHBoxLayout, QProgressBar,
-                             QLabel, QSpinBox, QWidgetAction)
-from PyQt6.QtCore import Qt, QDateTime, QTimer, QThread, pyqtSignal
-from PyQt6.QtGui import QShortcut, QKeySequence, QAction
-import pyqtgraph as pg
-pg.setConfigOptions(antialias=True)
-from influxdb_client import InfluxDBClient
-from protocol_backend.event_bus import bus
+import datetime as _dt                          # форматирование меток времени на графике
+import numpy as np                              # кольцевые буферы и операции с массивами точек
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,   # базовые виджеты и компоновка
+    QColorDialog, QFileDialog,                        # диалоги выбора цвета и сохранения файла
+    QFrame, QDateEdit, QTimeEdit,                     # рамка навигации, поля ввода даты/времени
+    QLabel, QSpinBox,
+    QSlider, QWidgetAction, QCheckBox,                # слайдер прозрачности, чекбокс точек
+    QDialog, QDialogButtonBox,                        # диалог выбора каналов для выгрузки
+)
+from PyQt6.QtCore import Qt, QDateTime, QTimer  # флаги Qt, работа с датой/временем, таймер скролла
+from PyQt6.QtGui import QShortcut, QKeySequence, QAction, QColor  # горячие клавиши, пункты меню, цвет
+import pyqtgraph as pg                          # графическая библиотека (PlotWidget, InfiniteLine и др.)
+pg.setConfigOptions(antialias=True, useOpenGL=True)
+from protocol_backend.event_bus import bus      # шина событий: получение точек от TenzaProcessor
 
-def _translate_pg_menus(plot_widget):
-    """Переводит контекстное меню pyqtgraph на русский."""
-    vb = plot_widget.getViewBox()
-    m  = vb.menu   # ViewBoxMenu
+# ── локальные модули ──────────────────────────────────────────────────────────
+from ._archive_worker import (
+    INFLUX_BUCKET,       # имя bucket в InfluxDB
+    LIVE_RENDER_MS,      # интервал таймера скролла live-графика (мс)
+    LIVE_WINDOW_SECS,    # глубина отображаемого live-окна (сек)
+    MAX_LIVE_POINTS,     # размер кольцевого буфера live-данных
+    N_ARCHIVE_WORKERS,   # количество параллельных потоков загрузки архива
+    _ArchiveWorker,      # QThread-воркер одного параллельного запроса к InfluxDB
+)
+from ._axis_item import _TimeAxisItem           # кастомная ось X с метками ЧЧ:ММ:СС
+from ._pg_menu_utils import (
+    _translate_pg_menus,                        # русификация контекстного меню pyqtgraph
+    _install_x_time_format,                     # форматирование полей диапазона оси X как время
+)
 
-    # ── ViewBox: верхний уровень ──────────────────────────────
-    m.viewAll.setVisible(False)
-    m.mouseModes[0].setText("3 кнопки (панорама)")
-    m.mouseModes[1].setText("1 кнопка (выделение)")
+# цвета каналов по умолчанию
+_CH_COLORS = ["#e67e22", "#3498db", "#2ecc71"]
 
-    # Режим мыши: 3 кнопки (панорама) по умолчанию, убрать из меню
-    vb.setMouseMode(pg.ViewBox.PanMode)
+# имена каналов (индекс 0 = канал 1)
+_CH_NAMES = [
+    "Текущая уставка нагружения",
+    "Датчик нагружения",
+    "Датчик перемещения",
+]
 
-    # ── ViewBox: подменю осей → перенести в "Масштаб" ────────
-    _sub_ru = {"X axis": "Ось X", "Y axis": "Ось Y"}
-    axis_actions = []
-    for action in m.actions():
-        if action.menu():
-            if action.text() in _sub_ru:
-                ru_title = _sub_ru[action.text()]
-                action.menu().setTitle(ru_title)
-                axis_actions.append((action, ru_title))
-            elif action.text() in ("Mouse Mode", "Режим мыши"):
-                action.setVisible(False)
-
-    scale_menu = m.addMenu("Масштаб")
-    for action, ru_title in axis_actions:
-        m.removeAction(action)
-        action.setText(ru_title)
-        scale_menu.addAction(action)
-
-    # Скрываем стандартный Export pyqtgraph при каждом открытии меню
-    def _hide_default_export():
-        for action in m.actions():
-            txt = action.text().replace("&", "")
-            if txt in ("Export...", "Export"):
-                action.setVisible(False)
-    m.aboutToShow.connect(_hide_default_export)
-
-    # ── ViewBox: форм-виджеты осей (X=ctrl[0], Y=ctrl[1]) ────
-    for ui in m.ctrl:
-        ui.autoRadio       .setText("Авто")
-        ui.manualRadio     .setText("Вручную")
-        ui.invertCheck     .setVisible(False)
-        ui.mouseCheck      .setVisible(False)
-        ui.visibleOnlyCheck.setVisible(False)
-        ui.autoPanCheck    .setVisible(False)
-        ui.label           .setText("Привязать к:")
-
-    # ── PlotItem: меню "Plot Options" и его подменю ───────────
-    pi = plot_widget.getPlotItem()
-    if not (hasattr(pi, "ctrlMenu") and pi.ctrlMenu):
-        return
-
-    pi.ctrlMenu.menuAction().setVisible(False)
-
-    _submenu_ru = {
-        "Transforms": "Преобразования",
-        "Downsample": "Прореживание",
-        "Average":    "Усреднение",
-        "Alpha":      "Прозрачность",
-        "Grid":       "Сетка",
+# ── стиль панели каналов (тёмная тема, совпадает с навбаром) ─────────────────
+_PANEL_STYLE = """
+    QFrame#chPanel {
+        background-color: #2c3e50;
+        border-bottom: 2px solid #3498db;
     }
-    _hidden = {"Points", "Alpha", "Grid", "Average", "Transforms", "Downsample"}
-    for action in pi.ctrlMenu.actions():
-        key = action.text().replace("&", "")
-        if key in _hidden:
-            action.setVisible(False)
-            continue
-        if key in _submenu_ru:
-            if action.menu():
-                action.menu().setTitle(_submenu_ru[key])
-            else:
-                action.setText(_submenu_ru[key])
-
-
-    # ── PlotItem: форм-виджеты внутри подменю ────────────────
-    c = pi.ctrl
-
-    # Transforms
-    c.fftCheck         .setText("Спектр мощности (БПФ)")
-    c.subtractMeanCheck.setText("Вычесть среднее")
-    c.logXCheck        .setText("Лог X")
-    c.logYCheck        .setText("Лог Y")
-    c.derivativeCheck  .setText("dy/dx")
-    c.phasemapCheck    .setText("Y vs. Y'")
-
-    # Downsample
-    c.downsampleCheck    .setText("Прореживание")
-    c.autoDownsampleCheck.setText("Авто")
-    c.subsampleRadio     .setText("Подвыборка")
-    c.meanRadio          .setText("Среднее")
-    c.peakRadio          .setText("Пик")
-    c.clipToViewCheck    .setText("Обрезать по виду")
-    c.maxTracesCheck     .setText("Макс. кривых:")
-    c.forgetTracesCheck  .setText("Удалять скрытые")
-
-    # Grid
-    c.xGridCheck.setText("Сетка X")
-    c.yGridCheck.setText("Сетка Y")
-    c.label     .setText("Непрозрачность")
-
-    # Alpha
-    c.autoAlphaCheck.setText("Авто")
-
-    # Points
-    c.autoPointsCheck.setText("Авто")
-    # заголовки QGroupBox внутри виджетов
-    c.averageGroup.setTitle("Усреднение")
-    c.pointsGroup .setTitle("Точки")
-    c.alphaGroup  .setTitle("Прозрачность")
-
-    # ── Свой CSV-экспорт в самом низу меню (скрыт по умолчанию) ──
-    sep_action = m.addSeparator()
-    csv_action = QAction("Экспорт в CSV", m)
-    csv_action.setVisible(False)
-    m.addAction(csv_action)
-
-    def _keep_at_bottom():
-        m.removeAction(sep_action)
-        m.removeAction(csv_action)
-        m.addAction(sep_action)
-        m.addAction(csv_action)
-    m.aboutToShow.connect(_keep_at_bottom)
-
-    return csv_action
-
-
-def _install_x_time_format(plot_widget):
-    """
-    Патчит поля ручного диапазона оси X:
-    - updateState → отображает ЧЧ:ММ:СС вместо Unix-timestamp
-    - text()      → возвращает float-строку, когда pyqtgraph читает значение
-    Поля ищем через findChildren — не зависит от индекса ctrl.
-    """
-    from PyQt6.QtWidgets import QLineEdit
-    vb   = plot_widget.getViewBox()
-    menu = vb.menu
-
-    # Найти подменю «Ось X» (уже переведено _translate_pg_menus)
-    x_submenu = None
-    for action in menu.actions():
-        if action.menu() and action.text() in ("Ось X", "X Axis", "X axis"):
-            x_submenu = action.menu()
-            break
-    if x_submenu is None:
-        return
-
-    les = x_submenu.findChildren(QLineEdit)
-    if len(les) < 2:
-        return
-    min_le, max_le = les[0], les[1]
-
-    def _fmt(orig_fn):
-        try:
-            return _dt.datetime.fromtimestamp(float(orig_fn())).strftime("%H:%M:%S")
-        except (ValueError, OSError):
-            return orig_fn()
-
-    def _parse(orig_fn):
-        text = orig_fn()
-        try:
-            float(text)
-            return text                      # уже число — оставляем
-        except ValueError:
-            x0, x1 = vb.viewRange()[0]
-            ref = _dt.datetime.fromtimestamp((x0 + x1) / 2)
-            for fmt in ("%H:%M:%S", "%H:%M"):
-                try:
-                    t = _dt.datetime.strptime(text.strip(), fmt)
-                    dt = ref.replace(hour=t.hour, minute=t.minute,
-                                     second=t.second, microsecond=0)
-                    return f"{dt.timestamp():.3f}"
-                except ValueError:
-                    continue
-            return text
-
-    # ── 1. updateState: после обновления полей → показать ЧЧ:ММ:СС ─────────
-    orig_update  = menu.updateState
-    orig_min_raw = min_le.text          # сохранить ДО shadowing
-    orig_max_raw = max_le.text
-    def _patched_update():
-        orig_update()
-        if not min_le.hasFocus():
-            min_le.setText(_fmt(orig_min_raw))
-        if not max_le.hasFocus():
-            max_le.setText(_fmt(orig_max_raw))
-    menu.updateState = _patched_update
-
-    # ── 2. shadow text(): pyqtgraph читает float, даже если показано время ──
-    min_le.text = lambda: _parse(orig_min_raw)
-    max_le.text = lambda: _parse(orig_max_raw)
-
-
-class _TimeAxisItem(pg.AxisItem):
-    """Ось X с метками в формате ЧЧ:ММ:СС (или дд.мм ЧЧ:ММ для больших диапазонов)."""
-
-    def tickStrings(self, values, scale, spacing):  # noqa: ARG002
-        result = []
-        for v in values:
-            try:
-                dt = _dt.datetime.fromtimestamp(v)
-                if spacing >= 86400:          # диапазон > суток → дд.мм ЧЧ:ММ
-                    result.append(dt.strftime("%d.%m\n%H:%M"))
-                elif spacing >= 3600:         # диапазон > часа → ЧЧ:ММ
-                    result.append(dt.strftime("%H:%M"))
-                elif spacing >= 1:            # секунды → ЧЧ:ММ:СС
-                    result.append(dt.strftime("%H:%M:%S"))
-                else:                         # миллисекунды
-                    result.append(dt.strftime("%H:%M:%S.") + f"{dt.microsecond // 1000:03d}")
-            except (OSError, ValueError, OverflowError):
-                result.append("")
-        return result
-
-
-INFLUX_URL    = "http://localhost:8086"
-INFLUX_TOKEN  = "wWASbkPKK0KKf4_kL6-FXqR5VENQM89VMgjJln1CNfPFBRgvlLkWPcQOU4p_zX2Up0zaWTKw59aQX0mmQ2Gc7Q=="
-INFLUX_ORG    = "Albreht"
-INFLUX_BUCKET = "plc_data"
-LIVE_RENDER_MS   = 50     # интервал скролла X-оси (20 fps)
-LIVE_WINDOW_SECS = 60     # глубина live-окна (сек)
-# буфер на 60 с при 4 мс/точку = 15 000 точек; берём с запасом
-MAX_LIVE_POINTS  = 20_000
-
-
-N_ARCHIVE_WORKERS = 4
-
-
-class _ArchiveWorker(QThread):
-    """Один параллельный запрос архива — своя часть диапазона."""
-    part_ready = pyqtSignal(int, list, list)   # (idx, times, values)
-
-    def __init__(self, idx: int, query: str, parent=None):
-        super().__init__(parent)
-        self._idx   = idx
-        self._query = query
-
-    def run(self):
-        client = None
-        try:
-            client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-            stream = client.query_api().query_stream(self._query)
-            times, values = [], []
-            for record in stream:
-                times.append(record.get_time().timestamp())
-                values.append(record.get_value())
-            self.part_ready.emit(self._idx, times, values)
-        except Exception as e:
-            print(f"[ArchiveWorker-{self._idx}] ошибка: {e}")
-            self.part_ready.emit(self._idx, [], [])
-        finally:
-            if client:
-                client.close()
+    QWidget {
+        background-color: #2c3e50;
+    }
+    QLabel {
+        color: #ecf0f1;
+        background: transparent;
+    }
+    QSpinBox {
+        background: #3d5166;
+        color: #ecf0f1;
+        border: 1px solid #4a6278;
+        border-radius: 3px;
+        padding: 1px 4px;
+        min-height: 20px;
+    }
+    QSpinBox::up-button, QSpinBox::down-button {
+        background: #4a6278;
+        border: none;
+        width: 14px;
+    }
+    QCheckBox {
+        color: #ecf0f1;
+        background: transparent;
+        spacing: 5px;
+    }
+    QCheckBox::indicator {
+        width: 14px;
+        height: 14px;
+        border: 1px solid #7f8c8d;
+        border-radius: 2px;
+        background: #3d5166;
+    }
+    QCheckBox::indicator:checked {
+        background: #3498db;
+        border-color: #2980b9;
+    }
+    QSlider::groove:horizontal {
+        background: #4a6278;
+        height: 4px;
+        border-radius: 2px;
+    }
+    QSlider::handle:horizontal {
+        background: #3498db;
+        width: 12px;
+        height: 12px;
+        margin: -4px 0;
+        border-radius: 6px;
+        border: none;
+    }
+    QSlider::handle:horizontal:hover {
+        background: #5dade2;
+    }
+"""
 
 
 class TrendsWiget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.current_color       = "#e67e22"
-        self._mode               = ""
-        self._archive_lines: list = []
-        self._archive_t:     list = []
-        self._archive_v:     list = []
-        self._archive_parts: dict = {}
-        self._archive_workers: list = []
-        self._workers_done       = 0
-        self._live_curve         = None
-        # кольцевой буфер для live-графика
-        self._buf_t     = np.empty(MAX_LIVE_POINTS, dtype=np.float64)
-        self._buf_v     = np.empty(MAX_LIVE_POINTS, dtype=np.float64)
-        self._buf_write = 0
-        self._buf_full  = False
+        # {ch_id: dict} — 3 фиксированных канала; структура ch-словаря описана в _setup_ui
+        self._channels: dict = {}
+
+        self._mode                    = ""
+        self._archive_lines: dict     = {}   # {ch_id: PlotDataItem}
+        self._archive_parts: dict     = {}   # {ch_id: {worker_idx: (times, values)}}
+        self._archive_workers: list   = []   # плоский список всех активных воркеров
+        self._workers_done            = 0
+        self._total_archive_workers   = 0
         self._auto_scroll: bool  = True
         self._y_range:     tuple = (0.0, 1.0)
-        self._show_points: bool  = False
-        self._line_width:  int   = 1
-        self._line_alpha:  int   = 255
+        self._ts_offset:   float = 0.0       # нормализация X для OpenGL (вычитается из timestamps)
 
         # таймер плавного скролла X-оси
         self._render_timer = QTimer(self)
@@ -351,129 +177,118 @@ class TrendsWiget(QWidget):
         row_mode.addStretch()
         root.addWidget(nav_frame)
 
-        # ── панель live ──────────────────────────────────────────────────────
-        self._live_panel = QWidget()
-        live_row = QHBoxLayout(self._live_panel)
-        live_row.setContentsMargins(0, 2, 0, 2)
-        live_row.setSpacing(6)
+        # ── строка: панель каналов + панель архива ───────────────────────────
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(4)
+        root.addLayout(controls_row)
 
-        live_row.addStretch()
-        root.addWidget(self._live_panel)
+        ch_frame = QFrame()
+        ch_frame.setObjectName("chPanel")
+        ch_frame.setStyleSheet(_PANEL_STYLE)
+        ch_outer = QVBoxLayout(ch_frame)
+        ch_outer.setContentsMargins(4, 2, 4, 2)
+        ch_outer.setSpacing(1)
+        controls_row.addWidget(ch_frame)
+
 
         QShortcut(QKeySequence(Qt.Key.Key_Left),  self, self._pan_left)
         QShortcut(QKeySequence(Qt.Key.Key_Right), self, self._pan_right)
 
         # ── панель архива ────────────────────────────────────────────────────
-        self._arch_panel = QWidget()
+        self._arch_panel = QFrame()
+        self._arch_panel.setStyleSheet(_PANEL_STYLE)
         arch_layout = QVBoxLayout(self._arch_panel)
-        arch_layout.setContentsMargins(0, 2, 0, 2)
+        arch_layout.setContentsMargins(4, 2, 4, 2)
         arch_layout.setSpacing(2)
 
-        arch_row = QHBoxLayout()
-        arch_row.setSpacing(4)
-
+        # ряд пресетов
+        presets_row = QHBoxLayout()
+        presets_row.setSpacing(2)
         presets = [
-            ("5 мин",  300),
-            ("30 мин", 1800),
-            ("1 час",  3600),
-            ("6 ч",    21600),
-            ("24 ч",   86400),
-            ("7 дн",   604800),
+            ("5м",  300),
+            ("30м", 1800),
+            ("1ч",  3600),
+            ("6ч",  21600),
+            ("24ч", 86400),
+            ("7д",  604800),
         ]
         self._preset_buttons: list = []
         for label, secs in presets:
             btn = QPushButton(label)
-            btn.setFixedHeight(24)
+            btn.setFixedHeight(18)
             btn.clicked.connect(lambda _, s=secs, b=btn: self._select_preset(s, b))
-            arch_row.addWidget(btn)
+            presets_row.addWidget(btn)
             self._preset_buttons.append(btn)
+        arch_layout.addLayout(presets_row)
 
-        arch_row.addWidget(QLabel("С:"))
+        # сетка: С/По + кнопка Загрузить на 2 строки
+        from PyQt6.QtWidgets import QGridLayout
         now = QDateTime.currentDateTime()
+        grid = QGridLayout()
+        grid.setSpacing(2)
+
         self.date_from = QDateEdit(now.addSecs(-300).date())
         self.date_from.setDisplayFormat("dd.MM.yyyy")
         self.date_from.setCalendarPopup(True)
-        self.date_from.setFixedHeight(24)
+        self.date_from.setFixedHeight(18)
         self.time_from = QTimeEdit(now.addSecs(-300).time())
         self.time_from.setDisplayFormat("HH:mm:ss")
-        self.time_from.setFixedHeight(24)
-        arch_row.addWidget(self.date_from)
-        arch_row.addWidget(self.time_from)
+        self.time_from.setFixedHeight(18)
 
-        arch_row.addWidget(QLabel("По:"))
         self.date_to = QDateEdit(now.date())
         self.date_to.setDisplayFormat("dd.MM.yyyy")
         self.date_to.setCalendarPopup(True)
-        self.date_to.setFixedHeight(24)
+        self.date_to.setFixedHeight(18)
         self.time_to = QTimeEdit(now.time())
         self.time_to.setDisplayFormat("HH:mm:ss")
-        self.time_to.setFixedHeight(24)
-        arch_row.addWidget(self.date_to)
-        arch_row.addWidget(self.time_to)
-
-        for field in (self.date_from, self.time_from, self.date_to, self.time_to):
-            field.dateTimeChanged.connect(lambda _: [b.setStyleSheet(self._PRESET_OFF) for b in self._preset_buttons])
+        self.time_to.setFixedHeight(18)
 
         self.btn_load = QPushButton("Загрузить")
-        self.btn_load.setFixedHeight(24)
         self.btn_load.clicked.connect(self._load_archive)
-        arch_row.addWidget(self.btn_load)
 
-        self._progress_bar = QProgressBar()
-        self._progress_bar.setRange(0, N_ARCHIVE_WORKERS)
-        self._progress_bar.setValue(0)
-        self._progress_bar.setTextVisible(True)
-        self._progress_bar.setFormat("%p%")
-        self._progress_bar.setFixedSize(100, 20)
-        self._progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #aaa;
-                border-radius: 3px;
-                background: #f0f0f0;
-                text-align: center;
-                font-size: 11px;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #3498db, stop:1 #2ecc71
-                );
-                border-radius: 3px;
-            }
-        """)
-        self._progress_bar.setVisible(False)
-        arch_row.addWidget(self._progress_bar)
-        arch_row.addStretch()
-        arch_layout.addLayout(arch_row)
+        grid.addWidget(QLabel("С:"),      0, 0)
+        grid.addWidget(self.date_from,    0, 1)
+        grid.addWidget(self.time_from,    0, 2)
+        grid.addWidget(QLabel("По:"),     1, 0)
+        grid.addWidget(self.date_to,      1, 1)
+        grid.addWidget(self.time_to,      1, 2)
+        grid.addWidget(self.btn_load,     0, 3, 2, 1)  # span 2 строки
 
-        self._arch_panel.hide()
-        root.addWidget(self._arch_panel)
+        arch_layout.addLayout(grid)
+
+        for field in (self.date_from, self.time_from, self.date_to, self.time_to):
+            field.dateTimeChanged.connect(
+                lambda _: [b.setStyleSheet(self._PRESET_OFF) for b in self._preset_buttons])
+
+        sp = self._arch_panel.sizePolicy()
+        sp.setRetainSizeWhenHidden(True)
+        self._arch_panel.setSizePolicy(sp)
+        self._arch_panel.setVisible(False)
+        controls_row.addWidget(self._arch_panel)
+        controls_row.addStretch()
 
         # ── график ───────────────────────────────────────────────────────────
-        self.plot_widget = pg.PlotWidget(axisItems={"bottom": _TimeAxisItem(orientation="bottom")})
+        self._time_axis  = _TimeAxisItem(orientation="bottom")
+        self.plot_widget = pg.PlotWidget(
+            axisItems={"bottom": self._time_axis})
         self.plot_widget.setBackground("w")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         _auto_btn = self.plot_widget.getPlotItem().autoBtn
         _auto_btn.hide()
         _auto_btn.show = lambda: None  # запретить pyqtgraph показывать кнопку
-        self.plot_widget.addLegend()
+        self._legend = self.plot_widget.addLegend()
         root.addWidget(self.plot_widget, 1)
 
         # перевод контекстного меню
-        self._csv_export_action = _translate_pg_menus(self.plot_widget)
-        self._csv_export_action.triggered.connect(self._export_csv)
+        self._csv_export_action, self._xlsx_export_action, self._export_menu_action = \
+            _translate_pg_menus(self.plot_widget)
+        self._csv_export_action .triggered.connect(self._export_csv)
+        self._xlsx_export_action.triggered.connect(self._export_excel)
 
         # поля ручного диапазона оси X → формат ЧЧ:ММ:СС
         _install_x_time_format(self.plot_widget)
         self._build_graph_context_menu()
-
-        self._live_curve = self.plot_widget.plot(
-            [], [],
-            pen=pg.mkPen(color=self.current_color, width=1),
-            name="tenzaSensor (live)",
-        )
-        self._live_curve.setDownsampling(auto=True, method='peak')
-        self._live_curve.setClipToView(True)
 
         # ── перекрестие + метка значения ────────────────────────────────────
         dash = pg.mkPen(color="#888888", width=1, style=Qt.PenStyle.DashLine)
@@ -484,7 +299,7 @@ class TrendsWiget(QWidget):
         self.plot_widget.addItem(self._vline, ignoreBounds=True)
         self.plot_widget.addItem(self._hline, ignoreBounds=True)
 
-        # ── постоянный маркер по клику ───────────────────────────────────────
+        # ── маркер по клику ──────────────────────────────────────────────────
         self._click_marker = pg.ScatterPlotItem(
             size=10,
             pen=pg.mkPen("#cc0000", width=2),
@@ -505,7 +320,202 @@ class TrendsWiget(QWidget):
         self.plot_widget.scene().sigMouseClicked.connect(self._on_mouse_clicked)
         self.plot_widget.getViewBox().sigRangeChangedManually.connect(self._on_manual_pan)
 
+        # Ctrl+колесо → масштаб оси X; обычное колесо → масштаб оси Y
+        _vb = self.plot_widget.getViewBox()
+        _vb_wheel = type(_vb).wheelEvent
+        def _wheel(ev, axis=None):
+            if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                _vb_wheel(_vb, ev, axis=0)
+            else:
+                _vb_wheel(_vb, ev, axis=1)
+        _vb.wheelEvent = _wheel
+
+        # ── 3 фиксированных канала ────────────────────────────────────────────
+
+        for ch_id, (color, name) in enumerate(zip(_CH_COLORS, _CH_NAMES), start=1):
+            self._init_channel(ch_id, color, name)
+            row = self._make_channel_row(ch_id)
+            self._channels[ch_id]['row'] = row
+            ch_outer.addWidget(row)
+
+        # статическая привязка каналов
+        # порядок combo: 0=не привязан, 1=Датчик нагружения, 2=Датчик перемещения, 3=Текущая уставка нагружения
+        _static = [
+            (1, 3, bus.nowSetpoint_points),    # Текущая уставка нагружения
+            (2, 1, bus.tenza_points),           # Датчик нагружения
+            (3, 2, bus.displacement_points),    # Датчик перемещения
+        ]
+        for ch_id, _, signal in _static:
+            self._channels[ch_id]['signal'] = signal
+        self._channels[1]['hold'] = True   # уставка тянется непрерывно до now
+        self._channels[1]['curve'].setClipToView(False)  # hold-канал рисует шаг-функцию вручную
+
         self._set_mode("live")
+
+    # ── инициализация каналов ─────────────────────────────────────────────────
+
+    def _init_channel(self, ch_id: int, color: str, name: str = ""):
+        """Создать запись канала и его кривую; строку UI не создаёт."""
+        curve = self.plot_widget.plot(
+            [], [],
+            pen=pg.mkPen(color=QColor(color), width=1),
+        )
+        curve.setDownsampling(auto=True, method='peak')
+        curve.setClipToView(True)   # для hold-каналов сбрасывается ниже в _setup_ui
+        curve.setSkipFiniteCheck(True)  # данные всегда конечны — пропуск NaN/inf проверки
+
+        self._channels[ch_id] = {
+            'curve':        curve,
+            'name':         name or f"канал {ch_id}",
+            'buf_t':        np.empty(MAX_LIVE_POINTS, dtype=np.float64),
+            'buf_v':        np.empty(MAX_LIVE_POINTS, dtype=np.float64),
+            'write':        0,
+            'full':         False,
+            'color':        color,
+            'width':        1,
+            'alpha':        255,
+            'points':       False,
+            'visible':      True,   # отображается ли канал на графике
+            'hold':         False,  # True → линия продлевается до now на каждом кадре
+            'last_val':     None,   # последнее полученное значение (для hold-режима)
+            'signal':       None,
+            'slot':         None,   # сохранённая ссылка на lambda-слот для отключения
+            'row':          None,
+            'color_btn':    None,
+            'toggle_btn':   None,
+        }
+
+    def _make_channel_row(self, ch_id: int) -> QWidget:
+        """Собрать горизонтальную строку управления каналом."""
+        ch = self._channels[ch_id]
+        row = QWidget()
+        row.setFixedHeight(22)
+        hl = QHBoxLayout(row)
+        hl.setContentsMargins(2, 0, 2, 0)
+        hl.setSpacing(4)
+
+        # ── вкл/выкл отображения ─────────────────────────────────────────────
+        toggle_btn = QPushButton("●")
+        toggle_btn.setCheckable(True)
+        toggle_btn.setChecked(True)
+        toggle_btn.setFixedSize(18, 18)
+        toggle_btn.setToolTip("Показать / скрыть канал на графике")
+        toggle_btn.setStyleSheet(_toggle_style(True))
+        toggle_btn.toggled.connect(
+            lambda checked, cid=ch_id: self._toggle_ch_visible(cid, checked))
+        ch['toggle_btn'] = toggle_btn
+
+        # ── цвет линии ───────────────────────────────────────────────────────
+        color_btn = QPushButton()
+        color_btn.setFixedSize(16, 16)
+        color_btn.setToolTip("Цвет линии")
+        color_btn.setStyleSheet(
+            f"background-color:{ch['color']}; border-radius:3px; border:1px solid #7f8c8d;")
+        color_btn.clicked.connect(lambda _=False, cid=ch_id: self._pick_channel_color(cid))
+        ch['color_btn'] = color_btn
+
+        # ── лейбл ────────────────────────────────────────────────────────────
+        lbl = QLabel(ch['name'] + ":")
+        lbl.setFixedWidth(180)
+
+        # ── толщина ──────────────────────────────────────────────────────────
+        width_spin = QSpinBox()
+        width_spin.setRange(1, 10)
+        width_spin.setValue(ch['width'])
+        width_spin.setFixedWidth(46)
+        width_spin.setToolTip("Толщина линии")
+        width_spin.valueChanged.connect(
+            lambda v, cid=ch_id: self._set_ch_width(cid, v))
+
+        # ── прозрачность ─────────────────────────────────────────────────────
+        alpha_slider = QSlider(Qt.Orientation.Horizontal)
+        alpha_slider.setRange(0, 100)
+        alpha_slider.setValue(100)
+        alpha_slider.setFixedWidth(80)
+        alpha_slider.setToolTip("Прозрачность линии")
+        alpha_slider.valueChanged.connect(
+            lambda v, cid=ch_id: self._set_ch_alpha(cid, v))
+
+        # ── точки ────────────────────────────────────────────────────────────
+        points_cb = QCheckBox("Точки")
+        points_cb.setChecked(ch['points'])
+        points_cb.toggled.connect(
+            lambda v, cid=ch_id: self._set_ch_points(cid, v))
+
+        hl.addWidget(toggle_btn)
+        hl.addWidget(color_btn)
+        hl.addWidget(lbl)
+        hl.addWidget(_sep())
+        hl.addWidget(QLabel("Толщина:"))
+        hl.addWidget(width_spin)
+        hl.addWidget(_sep())
+        hl.addWidget(QLabel("Прозрачность:"))
+        hl.addWidget(alpha_slider)
+        hl.addWidget(_sep())
+        hl.addWidget(points_cb)
+        hl.addStretch()
+
+        return row
+
+    # ── per-channel controls ──────────────────────────────────────────────────
+
+    def _toggle_ch_visible(self, ch_id: int, visible: bool):
+        """Показать или скрыть канал на графике, подключив/отключив сигнал."""
+        ch = self._channels.get(ch_id)
+        if ch is None:
+            return
+        ch['visible'] = visible
+        ch['curve'].setVisible(visible and self._mode == "live")
+        if visible and self._mode == "live":
+            self._connect_ch(ch_id, ch)
+            self._legend.addItem(ch['curve'], ch['name'])
+        else:
+            self._disconnect_ch(ch)
+            self._legend.removeItem(ch['curve'])
+        if ch['toggle_btn'] is not None:
+            ch['toggle_btn'].setStyleSheet(_toggle_style(visible))
+
+    def _pick_channel_color(self, ch_id: int):
+        """Открыть диалог выбора цвета для канала."""
+        ch = self._channels.get(ch_id)
+        if ch is None:
+            return
+        color = QColorDialog.getColor(QColor(ch['color']), self)
+        if color.isValid():
+            self.set_curve_color(ch_id, color.name())
+
+    def _set_ch_width(self, ch_id: int, width: int):
+        ch = self._channels.get(ch_id)
+        if ch is None:
+            return
+        ch['width'] = width
+        vb = self.plot_widget.getViewBox()
+        saved = vb.viewRange()
+        ch['curve'].opts['antialias'] = True
+        ch['curve'].setPen(pg.mkPen(color=_ch_qcolor(ch), width=width))
+        vb.setRange(xRange=saved[0], yRange=saved[1], padding=0)
+
+    def _set_ch_alpha(self, ch_id: int, value: int):
+        ch = self._channels.get(ch_id)
+        if ch is None:
+            return
+        ch['alpha'] = int(value * 2.55)
+        vb = self.plot_widget.getViewBox()
+        saved = vb.viewRange()
+        ch['curve'].setPen(pg.mkPen(color=_ch_qcolor(ch), width=ch['width']))
+        vb.setRange(xRange=saved[0], yRange=saved[1], padding=0)
+
+    def _set_ch_points(self, ch_id: int, checked: bool):
+        ch = self._channels.get(ch_id)
+        if ch is None:
+            return
+        ch['points'] = checked
+        vb = self.plot_widget.getViewBox()
+        saved = vb.viewRange()
+        ch['curve'].setSymbol('o' if checked else None)
+        ch['curve'].setSymbolSize(5 if checked else 1)
+        ch['curve'].setSymbolBrush(pg.mkBrush(ch['color']) if checked else None)
+        vb.setRange(xRange=saved[0], yRange=saved[1], padding=0)
 
     # ── режимы ────────────────────────────────────────────────────────────────
 
@@ -514,85 +524,160 @@ class TrendsWiget(QWidget):
             return
         self._mode = mode
         vb = self.plot_widget.getViewBox()
-        self._csv_export_action.setVisible(mode == "archive")
+        self._export_menu_action.setVisible(mode == "archive")
         if mode == "live":
             self.btn_live   .setChecked(True)
             self.btn_archive.setChecked(False)
-            self._live_panel.show()
-            self._arch_panel.hide()
+            self._arch_panel.setVisible(False)
             self.plot_widget.setLabel("bottom", "Время")
             self.plot_widget.setLabel("left", "Значение")
             self._clear_archive()
-            self._buf_write   = 0
-            self._buf_full    = False
+            for ch_id, ch in self._channels.items():
+                ch['write'] = 0
+                ch['full']  = False
+                ch['curve'].setVisible(ch['visible'])
+                if ch['visible']:
+                    self._connect_ch(ch_id, ch)
+                    self._legend.addItem(ch['curve'], ch['name'])
             self._y_range     = (0.0, 1.0)
             self._auto_scroll = True
-            self._live_curve.setVisible(True)
             vb.disableAutoRange()
             vb.setAutoVisible(y=False)
             self._render_timer.start(LIVE_RENDER_MS)
-            bus.tenza_points.connect(self._on_tenza_points)
         else:
             self.btn_live   .setChecked(False)
             self.btn_archive.setChecked(True)
-            self._live_panel.hide()
-            self._arch_panel.show()
-            try:
-                bus.tenza_points.disconnect(self._on_tenza_points)
-            except RuntimeError:
-                pass
+            self._arch_panel.setVisible(True)
+            for ch in self._channels.values():
+                self._disconnect_ch(ch)
+                self._legend.removeItem(ch['curve'])
             for w in self._archive_workers:
                 w.part_ready.disconnect()
             self._archive_workers.clear()
             self._render_timer.stop()
             self._clear_archive()
-            self._live_curve.setData([], [])
-            self._live_curve.setVisible(False)
+            for ch in self._channels.values():
+                ch['curve'].setData([], [])
+                ch['curve'].setVisible(False)
             vb.disableAutoRange()
             vb.enableAutoRange()
 
+    def _connect_ch(self, ch_id: int, ch: dict):
+        """Подключить сигнал канала (если привязан и ещё не подключён)."""
+        if ch['signal'] is None or ch['slot'] is not None:
+            return
+        def slot(times, values, _cid=ch_id):
+            self._push_points(_cid, times, values)
+        ch['slot'] = slot
+        # QueuedConnection обязателен: сигналы летят из _db_thread,
+        # а кольцевой буфер читается из главного потока в _render_frame.
+        # Без явного QueuedConnection лямбда вызывается из _db_thread → race condition.
+        ch['signal'].connect(slot, Qt.ConnectionType.QueuedConnection)
+
+    def _disconnect_ch(self, ch: dict):
+        """Отключить сигнал канала, сохраняя привязку (signal остаётся)."""
+        if ch['slot'] is None or ch['signal'] is None:
+            return
+        try:
+            ch['signal'].disconnect(ch['slot'])
+        except RuntimeError:
+            pass
+        ch['slot'] = None
+
     # ── live ──────────────────────────────────────────────────────────────────
 
-    def _on_tenza_points(self, times: list, values: list):
-        """Принимает готовые точки напрямую из TenzaProcessor (без InfluxDB)."""
+    def _push_points(self, ch_id: int, times: list, values: list):
+        """Записать точки в кольцевой буфер канала и обновить кривую."""
         if self._mode != "live":
             return
-        changed = False
+        ch = self._channels.get(ch_id)
+        if ch is None:
+            return
+        buf_t = ch['buf_t']
+        buf_v = ch['buf_v']
         for t, v in zip(times, values):
-            self._buf_t[self._buf_write] = t
-            self._buf_v[self._buf_write] = v
-            self._buf_write = (self._buf_write + 1) % MAX_LIVE_POINTS
-            if self._buf_write == 0:
-                self._buf_full = True
-            changed = True
+            w = ch['write']
+            buf_t[w] = t
+            buf_v[w] = v
+            ch['write'] = (w + 1) % MAX_LIVE_POINTS
+            if ch['write'] == 0:
+                ch['full'] = True
+        if values:
+            ch['last_val'] = values[-1]
 
-        if changed and (self._buf_full or self._buf_write > 0):
-            self._live_curve.setData(*self._get_buf_data())
-
-    def _get_buf_data(self) -> tuple:
-        """Возвращает (x, y) из кольцевого буфера в хронологическом порядке."""
-        if self._buf_full:
-            w = self._buf_write
-            x = np.concatenate([self._buf_t[w:], self._buf_t[:w]])
-            y = np.concatenate([self._buf_v[w:], self._buf_v[:w]])
+    def _get_buf_data(self, ch_id: int) -> tuple:
+        """Вернуть (x, y) из кольцевого буфера канала в хронологическом порядке."""
+        ch    = self._channels[ch_id]
+        buf_t = ch['buf_t']
+        buf_v = ch['buf_v']
+        w     = ch['write']
+        if ch['full']:
+            x = np.concatenate([buf_t[w:], buf_t[:w]])
+            y = np.concatenate([buf_v[w:], buf_v[:w]])
         else:
-            x = self._buf_t[:self._buf_write].copy()
-            y = self._buf_v[:self._buf_write].copy()
+            x = buf_t[:w].copy()
+            y = buf_v[:w].copy()
         return x, y
 
     def _render_frame(self):
         """50 мс: плавный скролл X-оси + обновление Y-диапазона."""
         now_ts = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() / 1000.0
 
-        if not self._auto_scroll:
-            return
+        # Нормализация X: вычитаем ts_offset чтобы OpenGL работал с малыми числами
+        # (float32 имеет точность ±256 сек на значении ~1.7e9 — видимая вибрация)
+        if self._auto_scroll:
+            self._ts_offset = now_ts - LIVE_WINDOW_SECS
+            self._time_axis.ts_offset = self._ts_offset
+            self.plot_widget.setXRange(0, LIVE_WINDOW_SECS, padding=0)
 
-        self.plot_widget.setXRange(now_ts - LIVE_WINDOW_SECS, now_ts, padding=0)
+        x_ref    = self._ts_offset
+        now_norm = now_ts - x_ref   # «сейчас» в нормализованных координатах
 
-        n = MAX_LIVE_POINTS if self._buf_full else self._buf_write
-        if n == 0:
+        # обновить все каналы синхронно
+        for ch_id, ch in self._channels.items():
+            if not ch['visible']:
+                continue
+            if ch['hold']:
+                # hold-канал: шаг-функция от window_start до now_norm
+                if ch['last_val'] is None:
+                    continue
+                win_start_norm = now_norm - LIVE_WINDOW_SECS
+                if ch['full'] or ch['write'] > 0:
+                    x, y = self._get_buf_data(ch_id)
+                    x = x - x_ref
+                    mask_before = x <= win_start_norm
+                    if np.any(mask_before):
+                        # есть точки до окна — продлить от win_start_norm
+                        val_at_start = float(y[np.where(mask_before)[0][-1]])
+                        mask_in = ~mask_before
+                        x_win = np.concatenate([[win_start_norm], x[mask_in], [now_norm]])
+                        y_win = np.concatenate([[val_at_start], y[mask_in], [ch['last_val']]])
+                    else:
+                        # все точки внутри окна — начинать с первой реальной точки
+                        x_win = np.concatenate([x, [now_norm]])
+                        y_win = np.concatenate([y, [ch['last_val']]])
+                else:
+                    x_win = np.array([win_start_norm, now_norm])
+                    y_win = np.array([ch['last_val'], ch['last_val']])
+                ch['curve'].setData(x_win, y_win)
+            else:
+                # обычный канал: данные из буфера, нормализованные
+                if ch['full'] or ch['write'] > 0:
+                    x, y = self._get_buf_data(ch_id)
+                    ch['curve'].setData((x - x_ref).astype(np.float32),
+                                        y.astype(np.float32))
+
+        # Y-диапазон по всем активным и видимым буферам
+        all_y = []
+        for ch in self._channels.values():
+            if not ch['visible']:
+                continue
+            n = MAX_LIVE_POINTS if ch['full'] else ch['write']
+            if n > 0:
+                all_y.append(ch['buf_v'][:n])
+        if not all_y:
             return
-        y = self._buf_v[:n]
+        y = np.concatenate(all_y)
         ymin, ymax = float(y.min()), float(y.max())
         span = (ymax - ymin) or abs(ymax) or 1.0
         lo, hi = ymin - span * 0.05, ymax + span * 0.05
@@ -608,7 +693,6 @@ class TrendsWiget(QWidget):
             self._auto_scroll = False
 
     def _resume_autoscroll(self):
-        """Кнопка '▶ В эфир' — вернуться к текущему времени."""
         if self._mode == "live":
             self._auto_scroll = True
             self._y_range = (0.0, 1.0)
@@ -628,15 +712,42 @@ class TrendsWiget(QWidget):
         vb = self.plot_widget.getViewBox()
         x0, x1 = vb.viewRange()[0]
         step = (x1 - x0) * 0.2
-        now_ts = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() / 1000.0
         self._auto_scroll = False
         self.plot_widget.setXRange(x0 + step, x1 + step, padding=0)
-
 
     # ── архив ─────────────────────────────────────────────────────────────────
 
     _PRESET_ON  = "background-color: #1a8fe3; color: white; font-weight: bold;"
     _PRESET_OFF = ""
+
+    # ch_id → (measurement, field) для запросов архива
+    _ARCHIVE_SOURCES = {
+        1: ("nowSetpoint",  "value"),
+        2: ("tenza",        "value"),
+        3: ("displacement", "value"),
+    }
+
+    def _set_load_progress(self, fraction):
+        """fraction=0..1 — заливка кнопки; None — сброс (загрузка завершена)."""
+        if fraction is None:
+            self.btn_load.setEnabled(True)
+            self.btn_load.setText("Загрузить")
+            self.btn_load.setStyleSheet("")
+            return
+        self.btn_load.setEnabled(False)
+        pct = int(fraction * 100)
+        stop = max(0.0, min(fraction, 1.0))
+        self.btn_load.setText(f"Загрузка {pct}%")
+        self.btn_load.setStyleSheet(f"""
+            QPushButton {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2980b9, stop:{stop:.3f} #2980b9,
+                    stop:{min(stop + 0.001, 1.0):.3f} #555555, stop:1 #555555);
+                color: white;
+                border: none;
+                border-radius: 3px;
+            }}
+        """)
 
     def _select_preset(self, secs: int, active_btn: QPushButton):
         now = QDateTime.currentDateTime()
@@ -654,11 +765,21 @@ class TrendsWiget(QWidget):
 
     def _load_archive(self):
         qdt_from = QDateTime(self.date_from.date(), self.time_from.time()).toUTC()
-        qdt_to = QDateTime(self.date_to.date(), self.time_to.time()).toUTC()
+        qdt_to   = QDateTime(self.date_to.date(),   self.time_to.time()).toUTC()
 
-        # отменяем предыдущие воркеры
+        # нормализация X для архива: отсчёт от начала запрошенного диапазона
+        self._ts_offset = qdt_from.toMSecsSinceEpoch() / 1000.0
+        self._time_axis.ts_offset = self._ts_offset
+
         for w in self._archive_workers:
-            w.part_ready.disconnect()
+            try:
+                w.part_ready.disconnect()
+            except RuntimeError:
+                pass
+            try:
+                w.finished.disconnect(self._on_archive_worker_done)
+            except RuntimeError:
+                pass
         self._archive_workers.clear()
 
         for b in self._preset_buttons:
@@ -666,74 +787,89 @@ class TrendsWiget(QWidget):
         self._clear_archive()
         self._archive_parts.clear()
         self._workers_done = 0
-        self._progress_bar.setValue(0)
-        self._progress_bar.setVisible(True)
-        self.btn_load.setEnabled(False)
 
         total_ms = qdt_from.msecsTo(qdt_to)
         step_ms  = total_ms // N_ARCHIVE_WORKERS
 
-        for i in range(N_ARCHIVE_WORKERS):
-            p_from = qdt_from.addMSecs(i * step_ms)
-            p_to   = qdt_from.addMSecs((i + 1) * step_ms) if i < N_ARCHIVE_WORKERS - 1 else qdt_to
-            query  = f'''
+        # запустить воркеры для каждого видимого канала
+        visible_sources = {
+            ch_id: src
+            for ch_id, src in self._ARCHIVE_SOURCES.items()
+            if self._channels.get(ch_id, {}).get('visible', True)
+        }
+        self._total_archive_workers = len(visible_sources) * N_ARCHIVE_WORKERS
+        self._set_load_progress(0)
+
+        for ch_id, (measurement, field) in visible_sources.items():
+            self._archive_parts[ch_id] = {}
+            for i in range(N_ARCHIVE_WORKERS):
+                p_from = qdt_from.addMSecs(i * step_ms)
+                p_to   = qdt_from.addMSecs((i + 1) * step_ms) if i < N_ARCHIVE_WORKERS - 1 else qdt_to
+                query  = f'''
 from(bucket: "{INFLUX_BUCKET}")
   |> range(start: {p_from.toString("yyyy-MM-ddTHH:mm:ssZ")}, stop: {p_to.toString("yyyy-MM-ddTHH:mm:ssZ")})
-  |> filter(fn: (r) => r._measurement == "tenza" and r._field == "value")
+  |> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}")
   |> group()
   |> sort(columns: ["_time"])
 '''
-            worker = _ArchiveWorker(i, query, parent=self)
-            worker.part_ready.connect(self._on_archive_part)
-            worker.finished.connect(self._on_archive_worker_done)
-            self._archive_workers.append(worker)
+                worker = _ArchiveWorker(i, query, parent=self)
+                worker.part_ready.connect(
+                    lambda idx, t, v, c=ch_id: self._on_archive_part(c, idx, t, v)
+                )
+                worker.finished.connect(self._on_archive_worker_done)
+                self._archive_workers.append(worker)
 
         for w in self._archive_workers:
             w.start()
 
-    def _on_archive_part(self, idx: int, times: list, values: list):
-        self._archive_parts[idx] = (times, values)
-        # показываем только последовательные части с начала
-        merged_t, merged_v = [], []
-        for i in range(N_ARCHIVE_WORKERS):
-            if i not in self._archive_parts:
-                break
-            merged_t.extend(self._archive_parts[i][0])
-            merged_v.extend(self._archive_parts[i][1])
-        if not merged_t:
+    def _on_archive_part(self, ch_id: int, idx: int, times: list, values: list):
+        if ch_id not in self._archive_parts:
             return
-        self._archive_t = merged_t
-        self._archive_v = merged_v
-        self._update_archive_curve()
+        self._archive_parts[ch_id][idx] = (times, values)
+        parts_t, parts_v = [], []
+        for i in range(N_ARCHIVE_WORKERS):
+            if i not in self._archive_parts[ch_id]:
+                break
+            t, v = self._archive_parts[ch_id][i]
+            if t:
+                parts_t.append(np.asarray(t, dtype=np.float64))
+                parts_v.append(np.asarray(v, dtype=np.float64))
+        if not parts_t:
+            return
+        x = np.concatenate(parts_t)
+        y = np.concatenate(parts_v)
+        self._update_archive_curve(ch_id, x, y)
 
     def _on_archive_worker_done(self):
         self._workers_done += 1
-        self._progress_bar.setValue(self._workers_done)
-        if self._workers_done == N_ARCHIVE_WORKERS:
+        self._set_load_progress(self._workers_done / max(self._total_archive_workers, 1))
+        if self._workers_done >= self._total_archive_workers:
             self._archive_workers.clear()
-            self._progress_bar.setVisible(False)
-            self.btn_load.setEnabled(True)
+            self._set_load_progress(None)
 
-    def _update_archive_curve(self):
-        x = np.array(self._archive_t)
-        y = np.array(self._archive_v)
-        w        = self._line_width
-        pen      = pg.mkPen(color=self.current_color, width=w)
-        show_pts = self._show_points
-        if self._archive_lines:
-            self._archive_lines[0].setData(x, y)
+    def _update_archive_curve(self, ch_id: int, x, y):
+        ch       = self._channels.get(ch_id, {})
+        if ch.get('hold', False) and len(x) > 1:
+            x, y = _step_xy(x, y)
+        x_norm = x - self._ts_offset   # нормализация для OpenGL
+        color    = ch.get('color',  "#e67e22")
+        width    = ch.get('width',  1)
+        show_pts = ch.get('points', False)
+        name = ch.get('name', f"канал {ch_id}")
+        pen  = pg.mkPen(color=color, width=width)
+        if ch_id in self._archive_lines:
+            self._archive_lines[ch_id].setData(x_norm, y)
         else:
             line = self.plot_widget.plot(
-                x, y, pen=pen, name="tenzaSensor (архив)",
+                x_norm, y, pen=pen,
                 symbol='o' if show_pts else None,
                 symbolSize=5 if show_pts else 1,
-                symbolBrush=pg.mkBrush(self.current_color) if show_pts else None,
+                symbolBrush=pg.mkBrush(color) if show_pts else None,
             )
-            line.setDownsampling(auto=True, method='peak')
+            line.setDownsampling(auto=True, method='subsample')
             line.setClipToView(True)
-            self._archive_lines.append(line)
-
-    # ── InfluxDB (фоновый поток) ───────────────────────────────────────────────
+            self._archive_lines[ch_id] = line
+            self._legend.addItem(line, name)
 
     # ── перекрестие и подсказка ───────────────────────────────────────────────
 
@@ -743,7 +879,6 @@ from(bucket: "{INFLUX_BUCKET}")
             self._vline.setVisible(False)
             self._hline.setVisible(False)
             return
-
         mp = self.plot_widget.getPlotItem().vb.mapSceneToView(pos)
         self._vline.setPos(mp.x())
         self._hline.setPos(mp.y())
@@ -751,109 +886,80 @@ from(bucket: "{INFLUX_BUCKET}")
         self._hline.setVisible(True)
 
     def _on_mouse_clicked(self, event):
-        # правый клик — убрать маркер
         if event.button() == Qt.MouseButton.RightButton:
             self._click_marker.setVisible(False)
             self._click_label.setVisible(False)
             return
-
-        # двойной клик — вернуться в эфир (live режим)
         if event.double():
             self._resume_autoscroll()
             return
-
+        if self._mode == "live":
+            self._auto_scroll = False
         pos = event.scenePos()
         if not self.plot_widget.sceneBoundingRect().contains(pos):
             return
+        mp      = self.plot_widget.getPlotItem().vb.mapSceneToView(pos)
+        click_x = mp.x()
+        click_y = mp.y()
 
-        mp = self.plot_widget.getPlotItem().vb.mapSceneToView(pos)
-        xs, ys = self._get_visible_data()
-        if xs is None or len(xs) == 0:
+        best_ch_name, best_ch_xs, best_ch_ys = None, None, None
+        best_y_dist = float('inf')
+        for name, xs, ys in self._iter_curve_data():
+            if len(xs) == 0:
+                continue
+            fi = int(np.searchsorted(xs, click_x, side='right')) - 1
+            fi = np.clip(fi, 0, len(xs) - 1)
+            y_at_click = float(ys[fi])
+            if np.isnan(y_at_click):
+                continue
+            d = abs(y_at_click - click_y)
+            if d < best_y_dist:
+                best_y_dist = d
+                best_ch_name, best_ch_xs, best_ch_ys = name, xs, ys
+
+        if best_ch_name is None:
+            return
+        _, (y0, y1) = self.plot_widget.getViewBox().viewRange()
+        y_span = (y1 - y0) or 1.0
+        if best_y_dist / y_span > 0.05:
             return
 
-        idx = int(np.searchsorted(xs, mp.x()))
-        idx = np.clip(idx, 0, len(xs) - 1)
-        if idx > 0 and abs(xs[idx - 1] - mp.x()) < abs(xs[idx] - mp.x()):
-            idx -= 1
-
-        x_pt, y_pt = xs[idx], ys[idx]
-        time_str = _dt.datetime.fromtimestamp(x_pt).strftime("%H:%M:%S.%f")[:-3]
-
-        self._click_marker.setData([x_pt], [y_pt])
-        self._click_label.setText(f"{time_str}\n{y_pt:.4f}")
-        self._click_label.setPos(x_pt, y_pt)
+        ni = int(np.searchsorted(best_ch_xs, click_x))
+        ni = np.clip(ni, 0, len(best_ch_xs) - 1)
+        if ni > 0 and abs(best_ch_xs[ni - 1] - click_x) < abs(best_ch_xs[ni] - click_x):
+            ni -= 1
+        best_x, best_y, best_name = float(best_ch_xs[ni]), float(best_ch_ys[ni]), best_ch_name
+        time_str = _dt.datetime.fromtimestamp(best_x + self._ts_offset).strftime("%H:%M:%S.%f")[:-3]
+        self._click_marker.setData([best_x], [best_y])
+        self._click_label.setText(f"{best_name}\n{time_str}\n{best_y:.4f}")
+        self._click_label.setPos(best_x, best_y)
         self._click_marker.setVisible(True)
         self._click_label.setVisible(True)
         event.accept()
 
-    def _get_visible_data(self):
-        """Возвращает (xs, ys) активной кривой."""
+    def _iter_curve_data(self):
+        """Итератор (name, xs, ys) по всем видимым кривым."""
         if self._mode == "live":
-            xs, ys = self._live_curve.getData()
-        elif self._archive_lines:
-            xs, ys = self._archive_lines[-1].getData()
+            for ch in self._channels.values():
+                if not ch['visible']:
+                    continue
+                xs, ys = ch['curve'].getData()
+                if xs is not None and len(xs) > 0:
+                    yield ch['name'], xs, ys
         else:
-            return None, None
-        if xs is None or len(xs) == 0:
-            return None, None
-        return xs, ys
+            for ch_id, line in self._archive_lines.items():
+                xs, ys = line.getData()
+                if xs is not None and len(xs) > 0:
+                    yield self._channels[ch_id]['name'], xs, ys
 
-    # ── вспомогательное ───────────────────────────────────────────────────────
+    # ── контекстное меню графика ──────────────────────────────────────────────
 
     def _build_graph_context_menu(self):
-        """Добавить подменю 'Линия' в контекстное меню графика (ПКМ)."""
-        from PyQt6.QtWidgets import QSlider
         menu = self.plot_widget.getViewBox().menu
         menu.addSeparator()
 
-        line_menu = menu.addMenu("Линия")
+        # настройки линий перенесены в панель каналов
 
-        # Цвет
-        action_color = QAction("Цвет...", line_menu)
-        action_color.triggered.connect(self._change_color)
-        line_menu.addAction(action_color)
-
-        # Толщина — спинбокс
-        width_w = QWidget()
-        width_l = QHBoxLayout(width_w)
-        width_l.setContentsMargins(16, 4, 8, 4)
-        width_l.setSpacing(6)
-        width_l.addWidget(QLabel("Толщина:"))
-        spin = QSpinBox()
-        spin.setRange(1, 10)
-        spin.setValue(self._line_width)
-        spin.setFixedWidth(52)
-        spin.valueChanged.connect(self._change_line_width)
-        width_l.addWidget(spin)
-        wa = QWidgetAction(line_menu)
-        wa.setDefaultWidget(width_w)
-        line_menu.addAction(wa)
-
-        # Прозрачность — слайдер 0–100 %
-        alpha_w = QWidget()
-        alpha_l = QHBoxLayout(alpha_w)
-        alpha_l.setContentsMargins(16, 4, 8, 4)
-        alpha_l.setSpacing(6)
-        alpha_l.addWidget(QLabel("Прозрачность:"))
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 100)
-        slider.setValue(100)
-        slider.setFixedWidth(90)
-        slider.valueChanged.connect(self._change_opacity)
-        alpha_l.addWidget(slider)
-        aa = QWidgetAction(line_menu)
-        aa.setDefaultWidget(alpha_w)
-        line_menu.addAction(aa)
-
-        # Показать / скрыть точки
-        line_menu.addSeparator()
-        self._action_points = QAction("Показать точки", line_menu)
-        self._action_points.setCheckable(True)
-        self._action_points.toggled.connect(self._toggle_points)
-        line_menu.addAction(self._action_points)
-
-        # Сетка в корне меню
-        menu.addSeparator()
         grid_menu = menu.addMenu("Сетка")
         act_grid_x = QAction("По X", grid_menu)
         act_grid_x.setCheckable(True)
@@ -861,12 +967,13 @@ from(bucket: "{INFLUX_BUCKET}")
         act_grid_y = QAction("По Y", grid_menu)
         act_grid_y.setCheckable(True)
         act_grid_y.setChecked(True)
-        def _update_grid():
-            self.plot_widget.showGrid(x=act_grid_x.isChecked(), y=act_grid_y.isChecked(), alpha=0.3)
+
         grid_alpha_val = [0.3]
 
         def _update_grid():
-            self.plot_widget.showGrid(x=act_grid_x.isChecked(), y=act_grid_y.isChecked(), alpha=grid_alpha_val[0])
+            self.plot_widget.showGrid(
+                x=act_grid_x.isChecked(), y=act_grid_y.isChecked(),
+                alpha=grid_alpha_val[0])
 
         act_grid_x.toggled.connect(lambda _: _update_grid())
         act_grid_y.toggled.connect(lambda _: _update_grid())
@@ -892,75 +999,53 @@ from(bucket: "{INFLUX_BUCKET}")
         alpha_ga.setDefaultWidget(alpha_gw)
         grid_menu.addAction(alpha_ga)
 
-    def _toggle_points(self, checked: bool):
-        self._show_points = checked
-        self._action_points.setText("Скрыть точки" if checked else "Показать точки")
-        sym   = 'o' if checked else None
-        size  = 5   if checked else 1
-        brush = pg.mkBrush(self.current_color)
-        for curve in [self._live_curve] + self._archive_lines:
-            if curve is None:
-                continue
-            curve.setSymbol(sym)
-            curve.setSymbolSize(size)
-            curve.setSymbolBrush(brush)
+    # ── вспомогательное ───────────────────────────────────────────────────────
 
     def _clear_archive(self):
-        for line in self._archive_lines:
+        for line in self._archive_lines.values():
+            self._legend.removeItem(line)
             self.plot_widget.removeItem(line)
         self._archive_lines.clear()
-        self._archive_t.clear()
-        self._archive_v.clear()
+        self._archive_parts.clear()
 
-    def _make_pen(self):
-        from PyQt6.QtGui import QColor
-        c = QColor(self.current_color)
-        c.setAlpha(self._line_alpha)
-        return pg.mkPen(color=c, width=self._line_width)
+    # ── публичный API ─────────────────────────────────────────────────────────
 
-    def _apply_pen(self):
-        pen = self._make_pen()
-        for curve in [self._live_curve] + self._archive_lines:
-            if curve is not None:
-                curve.setPen(pen)
+    def bind_channel(self, ch_id: int, signal) -> None:
+        """Привязать pyqtSignal к каналу ch_id (1, 2 или 3).
 
-    def _change_color(self):
-        color = QColorDialog.getColor()
-        if color.isValid():
-            self.current_color = color.name()
-            self._apply_pen()
-
-    def _change_opacity(self, value: int):
-        self._line_alpha = int(value * 2.55)
-        self._apply_pen()
-
-    def _change_line_width(self, width: int):
-        self._line_width = width
-        self._apply_pen()
-
-    def _export_csv(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить CSV", "", "CSV файлы (*.csv)"
-        )
-        if not path:
+        signal должен иметь сигнатуру (times: list, values: list).
+        Предыдущая привязка снимается автоматически.
+        """
+        ch = self._channels.get(ch_id)
+        if ch is None:
             return
-        xs, ys = self._get_visible_data()
-        if xs is None or len(xs) == 0:
+        self.unbind_channel(ch_id)
+        ch['signal'] = signal
+        if self._mode == "live" and ch['visible']:
+            self._connect_ch(ch_id, ch)
+
+    def unbind_channel(self, ch_id: int) -> None:
+        """Снять привязку сигнала от канала ch_id."""
+        ch = self._channels.get(ch_id)
+        if ch is None:
             return
-        def _rfc3339(ts):
-            dt = _dt.datetime.fromtimestamp(ts).astimezone()
-            off = dt.strftime("%z")          # +0300
-            off_fmt = off[:3] + ":" + off[3:]  # +03:00
-            return dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + off_fmt
-        t_start = _rfc3339(xs[0])
-        t_stop  = _rfc3339(xs[-1])
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            f.write("#group,false,false,true,true,false,false,true,true,true\n")
-            f.write("#datatype,string,long,dateTime:RFC3339,dateTime:RFC3339,dateTime:RFC3339,double,string,string,string\n")
-            f.write("#default,_result,,,,,,,,\n")
-            f.write(",result,table,_start,_stop,_time,_value,_field,_measurement,server\n")
-            for t, v in zip(xs, ys):
-                f.write(f",,0,{t_start},{t_stop},{_rfc3339(t)},{v},value,tenza,PLC1\n")
+        self._disconnect_ch(ch)
+        ch['signal'] = None
+
+    def set_curve_color(self, ch_id: int, color: str) -> None:
+        """Изменить цвет линии канала ch_id.
+
+        Пример:
+            trends.set_curve_color(1, "#ff0000")
+        """
+        ch = self._channels.get(ch_id)
+        if ch is None:
+            return
+        ch['color'] = color
+        ch['curve'].setPen(pg.mkPen(color=_ch_qcolor(ch), width=ch['width']))
+        if ch['color_btn'] is not None:
+            ch['color_btn'].setStyleSheet(
+                f"background-color:{color}; border-radius:3px; border:1px solid #7f8c8d;")
 
     def set_labels(self, x_label="X", y_label="Y"):
         self.plot_widget.setLabel("bottom", x_label)
@@ -969,3 +1054,239 @@ from(bucket: "{INFLUX_BUCKET}")
     def save_plot(self, filename):
         exporter = pg.exporters.ImageExporter(self.plot_widget.plotItem)
         exporter.export(filename)
+
+    # ── экспорт ───────────────────────────────────────────────────────────────
+
+    def _ask_export_channels(self) -> list[int]:
+        """Диалог выбора каналов для выгрузки. Возвращает список ch_id или []."""
+        available = {
+            ch_id: self._channels[ch_id]['name']
+            for ch_id in self._archive_lines
+            if ch_id in self._channels
+        }
+        if not available:
+            return []
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Выгрузка данных")
+        dlg.setMinimumWidth(320)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("Выберите каналы для выгрузки:"))
+
+        checks: dict[int, QCheckBox] = {}
+        for ch_id, name in available.items():
+            cb = QCheckBox(name)
+            cb.setChecked(True)
+            checks[ch_id] = cb
+            layout.addWidget(cb)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return []
+        return [ch_id for ch_id, cb in checks.items() if cb.isChecked()]
+
+    def _export_csv(self):
+        selected = self._ask_export_channels()
+        if not selected:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить CSV", "", "CSV файлы (*.csv)")
+        if not path:
+            return
+
+        def _fmt(ts):
+            dt = _dt.datetime.fromtimestamp(ts).astimezone()
+            return dt.strftime("%d.%m.%Y %H:%M:%S.%f")[:-3]
+
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            for ch_id in selected:
+                xs, ys = self._archive_lines[ch_id].getData()
+                if xs is None or len(xs) == 0:
+                    continue
+                name = self._channels[ch_id]['name']
+                f.write(f"# {name}\n")
+                f.write("Время,Значение\n")
+                for t, v in zip(xs, ys):
+                    f.write(f"{_fmt(t)},{round(float(v), 6)}\n")
+                f.write("\n")
+
+    def _export_excel(self):
+        selected = self._ask_export_channels()
+        if not selected:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить Excel", "", "Excel файлы (*.xlsx)")
+        if not path:
+            return
+
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from influxdb_client import InfluxDBClient
+        from ._archive_worker import INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET
+
+        qdt_from = QDateTime(self.date_from.date(), self.time_from.time()).toUTC()
+        qdt_to   = QDateTime(self.date_to.date(),   self.time_to.time()).toUTC()
+        t_from   = qdt_from.toString("yyyy-MM-ddTHH:mm:ssZ")
+        t_to     = qdt_to  .toString("yyyy-MM-ddTHH:mm:ssZ")
+
+        self.btn_load.setEnabled(False)
+        self.btn_load.setText("Экспорт…")
+
+        # прямой запрос к InfluxDB для каждого выбранного канала
+        ch_data: list[tuple[str, np.ndarray, np.ndarray]] = []
+        try:
+            client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+            for ch_id in selected:
+                measurement, field = self._ARCHIVE_SOURCES[ch_id]
+                query = f'''
+from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: {t_from}, stop: {t_to})
+  |> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}")
+  |> group()
+  |> sort(columns: ["_time"])
+'''
+                times, values = [], []
+                for rec in client.query_api().query_stream(query):
+                    times.append(rec.get_time().timestamp())
+                    values.append(rec.get_value())
+                if times:
+                    ch_data.append((self._channels[ch_id]['name'],
+                                    np.asarray(times,  dtype=np.float64),
+                                    np.asarray(values, dtype=np.float64)))
+        except Exception as e:
+            print(f"[Export] ошибка запроса: {e}")
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+            self.btn_load.setEnabled(True)
+            self.btn_load.setText("Загрузить")
+
+        if not ch_data:
+            return
+
+        # мастер-сетка: тенза (ch_id=2), иначе канал с наибольшим числом точек
+        master_name = self._channels[2]['name'] if 2 in selected else None
+        master_ts   = None
+        for name, xs, ys in ch_data:
+            if name == master_name:
+                master_ts = xs
+                break
+        if master_ts is None:
+            master_ts = max(ch_data, key=lambda d: len(d[1]))[1]
+
+        def _ffill(ts_chan, vs_chan, ts_all):
+            """Forward-fill — для редких каналов (уставка)."""
+            idx    = np.searchsorted(ts_chan, ts_all, side='right') - 1
+            result = np.full(len(ts_all), np.nan)
+            mask   = idx >= 0
+            result[mask] = vs_chan[idx[mask]]
+            if len(vs_chan) > 0 and not mask.all() and mask.any():
+                first = int(np.searchsorted(ts_all, ts_chan[0], side='left'))
+                result[:first] = vs_chan[0]
+            return result
+
+        def _nearest(ts_chan, vs_chan, ts_all, threshold=0.008):
+            """Nearest-fill с порогом — для каналов с тем же темпом (смещение)."""
+            if len(ts_chan) == 0:
+                return np.full(len(ts_all), np.nan)
+            idx    = np.searchsorted(ts_chan, ts_all)
+            prev_i = np.clip(idx - 1, 0, len(ts_chan) - 1)
+            next_i = np.clip(idx,     0, len(ts_chan) - 1)
+            prev_d = np.abs(ts_chan[prev_i] - ts_all)
+            next_d = np.abs(ts_chan[next_i] - ts_all)
+            best_i = np.where(prev_d <= next_d, prev_i, next_i)
+            best_d = np.minimum(prev_d, next_d)
+            result = np.full(len(ts_all), np.nan)
+            mask   = best_d <= threshold
+            result[mask] = vs_chan[best_i[mask]]
+            return result
+
+        # смещение и тенза — один темп (nearest); уставка — редкая (ffill)
+        _dense_names = {self._channels[2]['name'], self._channels[3]['name']}
+        aligned = [
+            (name, _nearest(xs, ys, master_ts) if name in _dense_names else _ffill(xs, ys, master_ts))
+            for name, xs, ys in ch_data
+        ]
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Архив"
+
+        header_fill = PatternFill("solid", fgColor="1A8FE3")
+        header_font = Font(bold=True, color="FFFFFF")
+        center = Alignment(horizontal="center")
+
+        headers    = ["Дата", "Время"] + [f"Значение {name}" for name, _ in aligned]
+        col_widths = [12, 15] + [max(20, len(h) + 2) for h in headers[2:]]
+        for col, (h, w) in enumerate(zip(headers, col_widths), 1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = center
+            ws.column_dimensions[cell.column_letter].width = w
+
+        val_cols = [vals for _, vals in aligned]
+        for row, ts in enumerate(master_ts, 2):
+            dt = _dt.datetime.fromtimestamp(float(ts)).astimezone()
+            ws.cell(row=row, column=1, value=dt.strftime("%d.%m.%Y"))
+            ws.cell(row=row, column=2, value=dt.strftime("%H:%M:%S.%f")[:-3])
+            for col, vals in enumerate(val_cols, 3):
+                v = vals[row - 2]
+                ws.cell(row=row, column=col,
+                        value=round(float(v), 3) if not np.isnan(v) else None)
+
+        wb.save(path)
+
+
+# ── вспомогательные функции модуля ───────────────────────────────────────────
+
+def _step_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Преобразовать массивы точек в ступенчатую функцию (горизонталь + вертикальный прыжок).
+
+    Для N точек возвращает 2N-1 точек:
+        [x0, x1, x1, x2, x2, ..., xn-1]
+        [y0, y0, y1, y1, ..., yn-1]
+    """
+    if len(x) <= 1:
+        return x, y
+    sx = np.repeat(x, 2)[1:]    # [x0, x1, x1, x2, x2, ..., xn-1]
+    sy = np.repeat(y, 2)[:-1]   # [y0, y0, y1, y1, ..., yn-1]
+    return sx, sy
+
+
+def _sep() -> QFrame:
+    """Вертикальный разделитель для строки канала."""
+    sep = QFrame()
+    sep.setFrameShape(QFrame.Shape.VLine)
+    sep.setStyleSheet("color: #4a6278;")
+    return sep
+
+
+def _ch_qcolor(ch: dict) -> QColor:
+    """QColor канала с учётом прозрачности."""
+    c = QColor(ch['color'])
+    c.setAlpha(ch['alpha'])
+    return c
+
+
+def _toggle_style(visible: bool) -> str:
+    """Стиль кнопки вкл/выкл канала."""
+    if visible:
+        return (
+            "QPushButton { color:#2ecc71; background:#2c3e50; "
+            "border:1px solid #27ae60; border-radius:3px; font-size:13px; }"
+            "QPushButton:hover { background:#27ae60; }"
+        )
+    return (
+        "QPushButton { color:#7f8c8d; background:#2c3e50; "
+        "border:1px solid #4a6278; border-radius:3px; font-size:13px; }"
+        "QPushButton:hover { background:#3d5166; }"
+    )

@@ -9,6 +9,8 @@ class Dev_192_168_6_6_OPC_Tags:
     cmdChangeControlMode = "ns=4;s=|var|Xinje-Cortex-Linux-SM-CNC.Application.MAIN.StandLogicEx.cmdChangeControlMode"
     cc = "ns=4;s=|var|Xinje-Cortex-Linux-SM-CNC.Application.MAIN.StandLogicEx.cc"
     tenzaSensorDataArr = "ns=4;s=|var|Xinje-Cortex-Linux-SM-CNC.Application.MAIN.StandLogicEx.tenzaSensorDataArr"
+    displacementSensorArr = "ns=4;s=|var|Xinje-Cortex-Linux-SM-CNC.Application.MAIN.StandLogicEx.displacementSensorArr"
+    nowSetpoint = "ns=4;s=|var|Xinje-Cortex-Linux-SM-CNC.Application.MAIN.StandLogicEx.nowSetpoint"
 
 
 # Использование:

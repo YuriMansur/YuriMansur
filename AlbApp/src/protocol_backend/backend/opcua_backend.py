@@ -1,5 +1,5 @@
 from typing import Dict, Optional, Callable, Any, List
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from protocol_backend.backend.thread.opcua.opcua_worker_thread import OpcUaWorkerThread
 
 
@@ -933,8 +933,11 @@ class OpcUaBackend(QObject):
             lambda err: self._on_server_error(server_id, err))
 
         # Данные от подписок и polling
+        # DirectConnection: on_data_updated callback вызывается прямо из потока OPC UA,
+        # минуя очередь главного потока — GUI лаг не задерживает запись в БД.
         thread.data_updated.connect(
-            lambda nid, val: self._on_data_updated(server_id, nid, val))
+            lambda nid, val: self._on_data_updated(server_id, nid, val),
+            Qt.ConnectionType.DirectConnection)
 
         # Теги
         thread.tag_subscribed.connect(
