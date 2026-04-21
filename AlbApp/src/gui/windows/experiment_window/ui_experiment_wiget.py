@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QFormLayout, QDateTimeEdit, QComboBox, QLineEdit, QScrollArea,
     QPushButton, QSpinBox, QSlider, QFileDialog, QDoubleSpinBox,
 )
-from PyQt6.QtCore import Qt, QDateTime, QTimer
+from PyQt6.QtCore import Qt, QDateTime, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 import pyqtgraph as pg
 import datetime, os
@@ -89,10 +89,10 @@ class _CameraWidget(QWidget):
         lay.addWidget(title)
 
         # превью
+        from PyQt6.QtWidgets import QSizePolicy
         self._preview = QLabel("Нет сигнала")
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        from PyQt6.QtWidgets import QSizePolicy
-        self._preview.setMinimumSize(520, 520)
+        self._preview.setMinimumSize(0, 0)
         self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._preview.setStyleSheet("""
             QLabel {
@@ -103,7 +103,7 @@ class _CameraWidget(QWidget):
                 font-size: 13px;
             }
         """)
-        lay.addWidget(self._preview)
+        lay.addWidget(self._preview, 1)
 
         # строка: выбор камеры + кнопки
         ctrl_row = QHBoxLayout()
@@ -117,8 +117,6 @@ class _CameraWidget(QWidget):
                 padding: 3px 6px; min-height: 24px; font-size: 12px;
             }
         """)
-        for idx in range(4):
-            self._cb_cam.addItem(f"Камера {idx}")
         ctrl_row.addWidget(self._cb_cam, 1)
 
         self._btn_open = QPushButton("▶ Открыть")
@@ -151,15 +149,71 @@ class _CameraWidget(QWidget):
         self._btn_open.clicked.connect(self._open_camera)
         self._btn_rec .clicked.connect(self._start_record)
         self._btn_stop.clicked.connect(self._stop)
+        self._populate_cameras()
+
+    def _populate_cameras(self):
+        self._cb_cam.clear()
+        if _cv2 is None:
+            self._cb_cam.addItem("opencv не установлен")
+            return
+        self._cb_cam.addItem("Поиск камер…")
+        self._cb_cam.setEnabled(False)
+        self._btn_open.setEnabled(False)
+
+        class _Scanner(QThread):
+            done = pyqtSignal(list)  # list of (idx, name)
+            def run(self):
+                # получаем имена устройств через PowerShell
+                names = []
+                try:
+                    import subprocess
+                    r = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "Get-PnpDevice -Class Camera -Status OK | "
+                         "Sort-Object InstanceId | "
+                         "Select-Object -ExpandProperty FriendlyName"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    names = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+                except Exception:
+                    pass
+
+                found = []
+                cam_idx = 0
+                for idx in range(6):
+                    cap = _cv2.VideoCapture(idx, _cv2.CAP_DSHOW)
+                    if cap.isOpened():
+                        cap.release()
+                        label = names[cam_idx] if cam_idx < len(names) else f"Устройство {idx}"
+                        found.append((idx, label))
+                        cam_idx += 1
+                self.done.emit(found)
+
+        self._scanner = _Scanner()
+        self._scanner.done.connect(self._on_cameras_found)
+        self._scanner.start()
+
+    def _on_cameras_found(self, found: list):
+        self._cb_cam.clear()
+        if not found:
+            self._cb_cam.addItem("Нет устройств")
+        else:
+            for idx, label in found:
+                self._cb_cam.addItem(label, idx)
+        self._cb_cam.setEnabled(True)
+        self._btn_open.setEnabled(True)
 
     def _open_camera(self):
         if _cv2 is None:
             self._lbl_status.setText("opencv-python не установлен")
             return
-        idx = self._cb_cam.currentIndex()
+        idx = self._cb_cam.currentData()
+        if idx is None:
+            return
         if self._cap:
             self._cap.release()
         self._cap = _cv2.VideoCapture(idx, _cv2.CAP_DSHOW)
+        self._cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
         if self._cap.isOpened():
             self._timer.start(33)
             self._btn_rec.setEnabled(True)
@@ -440,21 +494,24 @@ def _make_section1() -> QWidget:
 
 
 def _make_section2() -> QWidget:
-    scroll = QScrollArea()
-    scroll.setWidgetResizable(True)
-    scroll.setFrameShape(QFrame.Shape.NoFrame)
-    scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+    wrapper = QWidget()
+    wrapper.setStyleSheet("QWidget { background: transparent; }")
+    wrapper_layout = QVBoxLayout(wrapper)
+    wrapper_layout.setContentsMargins(0, 0, 0, 0)
+    wrapper_layout.setSpacing(4)
 
+    from PyQt6.QtWidgets import QSizePolicy as _SP
     container = QWidget()
     container.setStyleSheet(_FORM_STYLE + "QWidget { background: transparent; }")
+    container.setSizePolicy(_SP.Policy.Expanding, _SP.Policy.Preferred)
     layout = QVBoxLayout(container)
     layout.setContentsMargins(4, 4, 4, 4)
-    layout.setSpacing(12)
+    layout.setSpacing(4)
 
     # ── блок 1: Информация об образце ────────────────────────────────────────
     grp1 = _group_box("Информация об исследуемом образце", layout)
     form1 = QFormLayout()
-    form1.setSpacing(8)
+    form1.setSpacing(4)
     form1.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
     dt1 = QDateTimeEdit(QDateTime.currentDateTime())
@@ -484,7 +541,7 @@ def _make_section2() -> QWidget:
     # ── блок 2: Параметры испытания ──────────────────────────────────────────
     grp2 = _group_box("Параметры испытания", layout)
     form2 = QFormLayout()
-    form2.setSpacing(8)
+    form2.setSpacing(4)
     form2.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
     cb_std = QComboBox()
@@ -512,15 +569,16 @@ def _make_section2() -> QWidget:
 
     grp2.addLayout(form2)
 
-    # ── блок 3: Камера ───────────────────────────────────────────────────────
-    sep_cam = QFrame(); sep_cam.setFrameShape(QFrame.Shape.HLine)
-    sep_cam.setStyleSheet("QFrame { color: #4a6278; background: #4a6278; }")
-    layout.addWidget(sep_cam)
-    layout.addWidget(_CameraWidget())
+    wrapper_layout.addWidget(container, 1)
 
-    layout.addStretch()
-    scroll.setWidget(container)
-    return scroll
+    # ── камера — вне scroll area, растягивается на всё оставшееся место ──────
+    sep_cam = QFrame()
+    sep_cam.setFrameShape(QFrame.Shape.HLine)
+    sep_cam.setStyleSheet("QFrame { color: #4a6278; background: #4a6278; }")
+    wrapper_layout.addWidget(sep_cam)
+    wrapper_layout.addWidget(_CameraWidget(), 1)
+
+    return wrapper
 
 
 def _make_section3() -> QWidget:
@@ -669,24 +727,12 @@ class ExperimentWidget(QWidget):
     def __init__(self):
         super().__init__()
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(2, 2, 2, 2)
+        main_layout.setSpacing(2)
 
-        header = QLabel("Испытание")
-        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setStyleSheet("""
-            QLabel {
-                font-size: 24px;
-                font-weight: bold;
-                color: #1abc9c;
-                padding: 20px;
-                background-color: rgba(26, 188, 156, 0.1);
-            }
-        """)
-        main_layout.addWidget(header)
 
         columns_layout = QHBoxLayout()
-        columns_layout.setSpacing(6)
+        columns_layout.setSpacing(2)
 
         for i in range(1, 5):
             frame = QFrame()
@@ -709,6 +755,7 @@ class ExperimentWidget(QWidget):
             else:
                 col_layout.addStretch()
 
-            columns_layout.addWidget(frame, 1)
+            stretch = {1: 5, 2: 6, 3: 4, 4: 4}.get(i, 1)
+            columns_layout.addWidget(frame, stretch)
 
         main_layout.addLayout(columns_layout, 1)

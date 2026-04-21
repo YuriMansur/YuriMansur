@@ -44,7 +44,7 @@ class MainWindow(QMainWindow):
         content_layout = QVBoxLayout(content_widget) 
 
         # Внутренние отступы лэйаута.
-        content_layout.setContentsMargins(20, 20, 20, 20)   
+        content_layout.setContentsMargins(0, 0, 0, 0)   
 
         # Контейнер для страниц   
         self.stacked_widget = QStackedWidget()          
