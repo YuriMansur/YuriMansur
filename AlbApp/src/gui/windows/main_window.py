@@ -1,4 +1,5 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QStackedWidget, QVBoxLayout, QHBoxLayout)
+from PyQt6.QtCore import QTimer
 from gui.windows.experiment_window.ui_experiment_wiget import ExperimentWidget
 from gui.windows.trengs_window.trends_wiget import TrendsWiget
 from gui.windows.settings_window.ui_settings_wiget import SettingsWidget
@@ -16,20 +17,22 @@ class MainWindow(QMainWindow):
         #Установка стартового окна в контейнере                       
         self.current_page = 0                
 
-        # Создание виджета 
-        central_widget = QWidget() 
+        # Создание виджета
+        central_widget = QWidget()
+        central_widget.setObjectName("main_central")
 
-        # Установка как главный центральный виджет                         
-        self.setCentralWidget(central_widget) 
+        # Установка как главный центральный виджет
+        self.setCentralWidget(central_widget)
 
         # Основной лэйаут
-        main_layout = QVBoxLayout(central_widget)  
+        self.main_layout = QVBoxLayout(central_widget)
 
         # Внутренние отступы лэйаута.
-        main_layout.setContentsMargins(0, 0, 0, 0)     
+        self.main_layout.setContentsMargins(4, 4, 4, 4)
 
         # Расстояние между виджетами внутри лэйаута
-        main_layout.setSpacing(0)       
+        self.main_layout.setSpacing(0)
+        main_layout = self.main_layout
 
         # Создание верхней панели навигации   
         self.create_top_navigation()
@@ -133,8 +136,27 @@ class MainWindow(QMainWindow):
     
         # Добавляем страницы в контейнер
         self.stacked_widget.addWidget(page1)
-        self.stacked_widget.addWidget(page2)  
+        self.stacked_widget.addWidget(page2)
         self.stacked_widget.addWidget(page3)
+
+        page1.alarm_test.connect(self._start_alarm_blink)
+
+    def _start_alarm_blink(self):
+        self._blink_count = 0
+        self._blink_timer = QTimer(self)
+        self._blink_timer.timeout.connect(self._do_blink)
+        self._blink_timer.start(250)
+
+    def _do_blink(self):
+        if self._blink_count >= 10:
+            self._blink_timer.stop()
+            self.centralWidget().setStyleSheet("QWidget#main_central { border: 4px solid transparent; }")
+            return
+        if self._blink_count % 2 == 0:
+            self.centralWidget().setStyleSheet("QWidget#main_central { border: 4px solid #e74c3c; }")
+        else:
+            self.centralWidget().setStyleSheet("QWidget#main_central { border: 4px solid transparent; }")
+        self._blink_count += 1
 
 # Переключение страниц
     def switch_page(self, index):

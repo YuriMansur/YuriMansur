@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QComboBox, QGroupBox,
 from PyQt6.QtCore import Qt
 import json
 from gui.windows.settings_window.tab_wigets.ui_protocol_manager import ProtocolManagerWidget
+from gui.windows.settings_window.F_parameters import FWindow
 
 class SettingsWidget(QWidget):
     def __init__(self):
@@ -16,11 +17,12 @@ class SettingsWidget(QWidget):
         # Вкладка 1: Протокол и конфигурация
         self.protocol_widget = ProtocolManagerWidget()
         tab1 = self.protocol_widget
+        
     
         # Вкладка 2: Логи подключений
-        tab2 = QWidget()
-        tab2_layout = QVBoxLayout(tab2)
-        tab2_layout.addStretch()
+        self.f_parameters_wiget = FWindow()
+        tab2 = self.f_parameters_wiget
+        
         
         # Вкладка 3: Редактирование конфигурации
         tab3 = QWidget()
@@ -29,7 +31,7 @@ class SettingsWidget(QWidget):
         
         # Добавляем вкладки
         self.tabs.addTab(tab1, "🔧 Протоколы и устройства")
-        # self.tabs.addTab(tab2, "📋 Логи подключений")
+        self.tabs.addTab(tab2, "📋 Параметры стенда")
         # self.tabs.addTab(tab3, "✏️ Редактирование")
         
         page_layout.addWidget(self.tabs)

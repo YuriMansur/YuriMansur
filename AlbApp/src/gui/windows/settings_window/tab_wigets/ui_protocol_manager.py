@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QPushButton,
 )
-from PyQt6.QtCore import QDateTime
+from PyQt6.QtCore import QDateTime, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from protocol_backend.event_bus import bus
@@ -129,6 +129,20 @@ class ProtocolManagerWidget(QWidget):
             self.tenza_grid.addWidget(lbl, i // 4, i % 4)
         root.addLayout(self.tenza_grid)
 
+        # ── Объём БД ────────────────────────────────────────────────────
+        row_db = QHBoxLayout()
+        self.lbl_db_size = QLabel("Объём БД: —")
+        self.lbl_db_size.setStyleSheet("color:#aaaaaa;")
+        btn_refresh_db = QPushButton("↻")
+        btn_refresh_db.setFixedWidth(28)
+        btn_refresh_db.setToolTip("Обновить объём БД")
+        btn_refresh_db.clicked.connect(self._fetch_db_size)
+        row_db.addWidget(self.lbl_db_size)
+        row_db.addWidget(btn_refresh_db)
+        row_db.addStretch()
+        root.addLayout(row_db)
+        self._fetch_db_size()
+
         # ── Кнопка лога консоли ─────────────────────────────────────────
         self.btn_console_log = QPushButton("⏹ Стоп лог консоли")
         self.btn_console_log.setCheckable(True)
@@ -181,3 +195,28 @@ class ProtocolManagerWidget(QWidget):
         for btn in self._all_buttons:
             btn.set_online(False)
         self.log.write(f"[{srv}] отключен", "#e74c3c")
+
+    def _fetch_db_size(self):
+        class _Worker(QThread):
+            done = pyqtSignal(str)
+            def run(self):
+                try:
+                    import os, glob as _glob
+                    influx_data = os.path.join(os.getenv("USERPROFILE", ""), ".influxdbv2", "engine", "data")
+                    if not os.path.exists(influx_data):
+                        self.done.emit("Объём БД: папка не найдена")
+                        return
+                    total = sum(
+                        os.path.getsize(f)
+                        for f in _glob.glob(os.path.join(influx_data, "**"), recursive=True)
+                        if os.path.isfile(f)
+                    )
+                    mb = total / (1024 * 1024)
+                    self.done.emit(f"Объём БД: {mb:.1f} МБ")
+                except Exception as e:
+                    self.done.emit(f"Объём БД: ошибка ({e})")
+
+        self._db_worker = _Worker()
+        self._db_worker.done.connect(self.lbl_db_size.setText)
+        self.lbl_db_size.setText("Объём БД: загрузка…")
+        self._db_worker.start()
