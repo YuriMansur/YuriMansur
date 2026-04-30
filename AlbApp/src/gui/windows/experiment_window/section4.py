@@ -3,7 +3,7 @@ import pyqtgraph as pg
 
 pg.setConfigOptions(antialias=True)
 
-_CHART_TITLES = ["Канал 1", "Канал 2", "Канал 3"]
+_CHART_TITLES = ["Нагружение, H", "Скорость нагружения H/сек", "Положение, L мм"]
 _CH_COLORS    = ["#e67e22", "#3498db", "#2ecc71"]
 
 

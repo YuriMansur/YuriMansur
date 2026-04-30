@@ -54,6 +54,20 @@ def _led(color: str = "#2ecc71") -> QLabel:
     return lbl
 
 
+class _StaticLabel(QLabel):
+    """QLabel с фиксированным sizeHint — не триггерит layout при смене контента."""
+    def __init__(self, h: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._fixed_h = h
+        self.setFixedHeight(h)
+    def sizeHint(self):
+        from PyQt6.QtCore import QSize
+        return QSize(super().sizeHint().width(), self._fixed_h)
+    def minimumSizeHint(self):
+        from PyQt6.QtCore import QSize
+        return QSize(0, self._fixed_h)
+
+
 class _CameraWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -71,9 +85,8 @@ class _CameraWidget(QWidget):
         title.setStyleSheet("font-size: 13px; font-weight: bold; color: #1abc9c; background: transparent; border: none;")
         lay.addWidget(title)
 
-        self._preview = QLabel("Нет сигнала")
+        self._preview = _StaticLabel(360, "Нет сигнала")
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview.setFixedHeight(240)
         self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._preview.setStyleSheet("""
             QLabel {
@@ -81,7 +94,7 @@ class _CameraWidget(QWidget):
                 border: 1px solid #4a6278; border-radius: 4px; font-size: 13px;
             }
         """)
-        lay.addWidget(self._preview, 1)
+        lay.addWidget(self._preview)
 
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(6)
@@ -116,11 +129,11 @@ class _CameraWidget(QWidget):
             btn.setStyleSheet(_btn_style)
             ctrl_row.addWidget(btn)
 
-        lay.addLayout(ctrl_row)
-
         self._lbl_status = QLabel("Камера закрыта")
         self._lbl_status.setStyleSheet("font-size: 11px; color: #7f8c8d; background: transparent; border: none;")
         lay.addWidget(self._lbl_status)
+
+        lay.addLayout(ctrl_row)
 
         self._btn_open.clicked.connect(self._open_camera)
         self._btn_rec.clicked.connect(self._start_record)
@@ -263,43 +276,32 @@ def _make_section1() -> QWidget:
     lay.setContentsMargins(6, 6, 6, 6)
     lay.setSpacing(8)
 
-    title = QLabel("Параметры оборудования стенда")
-    title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    title.setStyleSheet("font-size: 14px; font-weight: bold; color: #ecf0f1; background: transparent; border: none;")
-    title.setWordWrap(True)
-    lay.addWidget(title)
+    btn_docs = QPushButton("📄 Документация (ГОСТ)")
+    btn_docs.setStyleSheet("""
+        QPushButton {
+            background: #2c3e50; color: #ecf0f1;
+            border: 1px solid #1abc9c; border-radius: 4px;
+            padding: 6px 14px; font-size: 12px;
+        }
+        QPushButton:hover   { background: #1abc9c; color: #1a252f; }
+        QPushButton:pressed { background: #17a589; }
+    """)
 
-    sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.HLine)
-    sep1.setStyleSheet("QFrame { color: #4a6278; }")
-    lay.addWidget(sep1)
+    def _open_pdf():
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout
+        from pdf_reader import PdfReaderWidget
+        dlg = QDialog(btn_docs.window())
+        dlg.setWindowTitle("Документация")
+        dlg.setModal(False)
+        dlg.resize(1100, 800)
+        dlg_lay = QVBoxLayout(dlg)
+        dlg_lay.setContentsMargins(0, 0, 0, 0)
+        dlg_lay.addWidget(PdfReaderWidget())
+        btn_docs._pdf_dlg = dlg  # держим ссылку
+        dlg.show()
 
-    from PyQt6.QtWidgets import QFormLayout
-    form = QFormLayout()
-    form.setSpacing(6)
-    form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-    try:
-        import json as _json
-        with open("params.json", "r", encoding="utf-8") as _f:
-            _si = _json.load(_f).get("stand_info", {})
-    except (FileNotFoundError, ValueError):
-        _si = {}
-
-    fields = [
-        ("Марка и модель стенда:",  _si.get("stand_model", "")),
-        ("Серийный номер стенда:",  _si.get("stand_serial", "")),
-        ("Дата аттестации стенда:", _si.get("stand_date", "")),
-        ("Марка и модель СИ 1:",    _si.get("si1_model", "")),
-        ("Марка и модель СИ 2:",    _si.get("si2_model", "")),
-    ]
-    for label, value in fields:
-        le = QLabel(value)
-        form.addRow(label, le)
-    lay.addLayout(form)
-
-    sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
-    sep2.setStyleSheet("QFrame { color: #4a6278; }")
-    lay.addWidget(sep2)
+    btn_docs.clicked.connect(_open_pdf)
+    lay.addWidget(btn_docs)
 
     btn_alarm_test = QPushButton("Тест аварии")
     btn_alarm_test.setStyleSheet("""
@@ -390,10 +392,23 @@ def _make_section1() -> QWidget:
     right_col.addWidget(btn_power)
     right_col.addWidget(btn_manual)
 
+    btn_reset = QPushButton("Сброс")
+
+    def _emit_reset():
+        from gui.windows.experiment_window.ui_experiment_wiget import ExperimentWidget
+        w = btn_reset.parent()
+        while w is not None:
+            if isinstance(w, ExperimentWidget):
+                w.alarm_reset.emit()
+                return
+            w = w.parent()
+
+    btn_reset.clicked.connect(_emit_reset)
+
     extra_row = QHBoxLayout()
     extra_row.setSpacing(6)
     extra_row.addWidget(btn_alarm_test)
-    extra_row.addWidget(QPushButton("Сброс"))
+    extra_row.addWidget(btn_reset)
     extra_row.addStretch()
 
     motion_row.addLayout(arrows_col)
@@ -428,7 +443,9 @@ def _make_section1() -> QWidget:
     sep_cam = QFrame(); sep_cam.setFrameShape(QFrame.Shape.HLine)
     sep_cam.setStyleSheet("QFrame { color: #4a6278; background: #4a6278; }")
     lay.addWidget(sep_cam)
-    lay.addWidget(_CameraWidget(), 1)
+    cam = _CameraWidget()
+    cam.setFixedHeight(440)
+    lay.addWidget(cam)
 
     lay.addStretch()
     scroll.setWidget(container)

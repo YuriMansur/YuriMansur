@@ -4,118 +4,156 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+_STYLE = """
+    QWidget { background: transparent; }
+    QLabel  { color: #ecf0f1; font-size: 12px; background: transparent; border: none; }
+    QPushButton {
+        background: #3d5166; color: #ecf0f1;
+        border: 1px solid #4a6278; border-radius: 3px;
+        padding: 4px 12px; min-height: 24px; font-size: 12px;
+    }
+    QPushButton:hover  { background: #4a6a82; }
+    QPushButton:pressed { background: #2980b9; }
+    QComboBox {
+        background: #2c3e50; color: #ecf0f1;
+        border: 1px solid #4a6278; border-radius: 3px;
+        padding: 3px 6px; min-height: 22px; font-size: 12px;
+    }
+    QSpinBox {
+        background: #2c3e50; color: #ecf0f1;
+        border: 1px solid #4a6278; border-radius: 3px;
+        padding: 3px 6px; min-height: 22px; font-size: 12px; min-width: 60px;
+    }
+"""
 
-def _make_section3() -> QWidget:
-    scroll = QScrollArea()
-    scroll.setWidgetResizable(True)
-    scroll.setFrameShape(QFrame.Shape.NoFrame)
-    scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+# Процедуры: ключ — (gost, method), значение — список шагов.
+# Каждый шаг: dict с полями:
+#   type: "title" | "subtitle" | "info" | "step" | "button" | "f0row" | "protocol"
+PROCEDURES: dict[tuple, list[dict]] = {
+    ("Р ИСО 10328-2021", "16.2.2"): [
+        {"type": "title",    "text": "16.2.2  Основное статическое испытание"},
+        {"type": "subtitle", "text": "Установите образец"},
+        {"type": "info",     "text": "· Зарегистрировать условие нагружения и уровень нагрузки, значения"},
+        {"type": "f0row"},
+        {"type": "step",     "num": "4", "desc": "t = не менее 10с и не более 30с",           "btn": "Fset"},
+        {"type": "step",     "num": "5", "desc": "t = не менее 10 мин и не более 20 мин",      "btn": "F=0"},
+        {"type": "button",   "text": "Fstab",   "num": "6."},
+        {"type": "button",   "text": "Записать","num": "8. Обнулить 2"},
+        {"type": "button",   "text": "Fsu upper","num": "5."},
+        {"type": "protocol"},
+    ],
+    ("Р ИСО 10328-2021", "16.2.2+С"): [
+        {"type": "title",    "text": "16.2.2+С  Испытание со стабилизацией"},
+        {"type": "subtitle", "text": "Установите образец"},
+        {"type": "info",     "text": "· Зарегистрировать условие нагружения и уровень нагрузки, значения"},
+        {"type": "f0row"},
+        {"type": "step",     "num": "4", "desc": "t = не менее 10с и не более 30с",           "btn": "Fset"},
+        {"type": "step",     "num": "5", "desc": "t = не менее 10 мин и не более 20 мин",      "btn": "F=0"},
+        {"type": "button",   "text": "Fstab",   "num": "6."},
+        {"type": "button",   "text": "Fsu upper","num": "7."},
+        {"type": "protocol"},
+    ],
+}
 
-    container = QWidget()
-    container.setStyleSheet("""
-        QWidget { background: transparent; }
-        QLabel  { color: #ecf0f1; font-size: 12px; background: transparent; border: none; }
-        QPushButton {
-            background: #3d5166; color: #ecf0f1;
-            border: 1px solid #4a6278; border-radius: 3px;
-            padding: 4px 12px; min-height: 24px; font-size: 12px;
-        }
-        QPushButton:hover  { background: #4a6a82; }
-        QPushButton:pressed { background: #2980b9; }
-        QComboBox {
-            background: #2c3e50; color: #ecf0f1;
-            border: 1px solid #4a6278; border-radius: 3px;
-            padding: 3px 6px; min-height: 22px; font-size: 12px;
-        }
-        QSpinBox {
-            background: #2c3e50; color: #ecf0f1;
-            border: 1px solid #4a6278; border-radius: 3px;
-            padding: 3px 6px; min-height: 22px; font-size: 12px; min-width: 60px;
-        }
-    """)
-    lay = QVBoxLayout(container)
-    lay.setContentsMargins(6, 6, 6, 6)
-    lay.setSpacing(10)
+# Процедура по умолчанию если комбинация не найдена
+_DEFAULT_PROCEDURE = [
+    {"type": "info", "text": "Для данного сочетания ГОСТ / Методика процедура не задана."},
+]
 
-    def _orange(text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setStyleSheet("color: #e67e22; font-size: 12px; font-weight: bold; background: transparent; border: none;")
-        lbl.setWordWrap(True)
-        return lbl
 
-    def _btn(text: str) -> QPushButton:
-        return QPushButton(text)
+class Section3Widget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
 
-    def _step(num: str, desc: str, btn_text: str) -> None:
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        row.addWidget(_orange(f"{num}."))
-        lbl = QLabel(desc)
-        lbl.setWordWrap(True)
-        row.addWidget(lbl, 1)
-        lay.addLayout(row)
-        lay.addWidget(_btn(btn_text))
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        root.addWidget(self._scroll)
 
-    title_lbl = QLabel("16.2.2  Основное статическое испытание")
-    title_lbl.setStyleSheet("color: #e67e22; font-size: 13px; font-weight: bold; background: transparent; border: none;")
-    title_lbl.setWordWrap(True)
-    lay.addWidget(title_lbl)
+        self._gost   = ""
+        self._method = ""
+        self._rebuild()
 
-    sub = QLabel("Установите образец")
-    sub.setStyleSheet("color: #1abc9c; font-size: 13px; font-weight: bold; background: transparent; border: none;")
-    lay.addWidget(sub)
+    def set_params(self, gost: str, method: str):
+        if gost == self._gost and method == self._method:
+            return
+        self._gost   = gost
+        self._method = method
+        self._rebuild()
 
-    info = QLabel("· Зарегистрировать условие нагружения и уровень нагрузки, значения")
-    info.setWordWrap(True)
-    lay.addWidget(info)
+    def _rebuild(self):
+        steps = PROCEDURES.get((self._gost, self._method), _DEFAULT_PROCEDURE)
 
-    row_f0 = QHBoxLayout()
-    row_f0.addWidget(_btn("F=0"))
-    spin_f = QSpinBox(); spin_f.setRange(-99999, 99999); spin_f.setValue(0)
-    row_f0.addWidget(spin_f)
-    row_f0.addStretch()
-    lay.addLayout(row_f0)
+        container = QWidget()
+        container.setStyleSheet(_STYLE)
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(10)
 
-    lay.addWidget(QLabel("Специальное приспособление 2"))
-    cb_fixture = QComboBox()
-    cb_fixture.addItems(["", "Приспособление A", "Приспособление B"])
-    lay.addWidget(cb_fixture)
+        for step in steps:
+            t = step["type"]
 
-    _step("4", "t = не менее 10с и не более 30с", "Fset")
-    _step("5", "t = не менее 10 мин и не более 20 мин", "F=0")
+            if t == "title":
+                lbl = QLabel(step["text"])
+                lbl.setStyleSheet("color: #e67e22; font-size: 13px; font-weight: bold; background: transparent; border: none;")
+                lbl.setWordWrap(True)
+                lay.addWidget(lbl)
 
-    lay.addWidget(_orange("6."))
-    lay.addWidget(_btn("Fstab"))
+            elif t == "subtitle":
+                lbl = QLabel(step["text"])
+                lbl.setStyleSheet("color: #1abc9c; font-size: 13px; font-weight: bold; background: transparent; border: none;")
+                lay.addWidget(lbl)
 
-    lay.addWidget(_orange("8.  Обнулить 2"))
-    lay.addWidget(_btn("Записать"))
+            elif t == "info":
+                lbl = QLabel(step["text"])
+                lbl.setWordWrap(True)
+                lay.addWidget(lbl)
 
-    lay.addWidget(_orange("5."))
-    lay.addWidget(_btn("Fsu upper"))
+            elif t == "f0row":
+                row = QHBoxLayout()
+                row.addWidget(QPushButton("F=0"))
+                spin = QSpinBox(); spin.setRange(-99999, 99999); spin.setValue(0)
+                row.addWidget(spin)
+                row.addStretch()
+                lay.addLayout(row)
 
-    lay.addWidget(QLabel("Записать L1"))
-    row_l1 = QHBoxLayout()
-    row_l1.addWidget(_btn("Записать"))
-    lbl_l1 = QLabel("L1")
-    row_l1.addWidget(lbl_l1)
-    spin_l1 = QSpinBox(); spin_l1.setRange(-99999, 99999); spin_l1.setValue(0)
-    row_l1.addWidget(spin_l1)
-    row_l1.addStretch()
-    lay.addLayout(row_l1)
+            elif t == "step":
+                num_lbl = QLabel(f"{step['num']}.")
+                num_lbl.setStyleSheet("color: #e67e22; font-size: 12px; font-weight: bold; background: transparent; border: none;")
+                desc_lbl = QLabel(step["desc"])
+                desc_lbl.setWordWrap(True)
+                row = QHBoxLayout()
+                row.setSpacing(6)
+                row.addWidget(num_lbl)
+                row.addWidget(desc_lbl, 1)
+                lay.addLayout(row)
+                lay.addWidget(QPushButton(step["btn"]))
 
-    lay.addStretch()
+            elif t == "button":
+                lbl = QLabel(step["num"])
+                lbl.setStyleSheet("color: #e67e22; font-size: 12px; font-weight: bold; background: transparent; border: none;")
+                lay.addWidget(lbl)
+                lay.addWidget(QPushButton(step["text"]))
 
-    btn_protocol = QPushButton("Сформировать Протокол")
-    btn_protocol.setStyleSheet("""
-        QPushButton {
-            background: #2c3e50; color: #ecf0f1;
-            border: 2px solid #1abc9c; border-radius: 4px;
-            padding: 10px; font-size: 14px; font-weight: bold;
-        }
-        QPushButton:hover  { background: #1abc9c; color: #1a252f; }
-        QPushButton:pressed { background: #17a589; }
-    """)
-    lay.addWidget(btn_protocol)
+            elif t == "protocol":
+                lay.addStretch()
+                btn = QPushButton("Сформировать Протокол")
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: #2c3e50; color: #ecf0f1;
+                        border: 2px solid #1abc9c; border-radius: 4px;
+                        padding: 10px; font-size: 14px; font-weight: bold;
+                    }
+                    QPushButton:hover  { background: #1abc9c; color: #1a252f; }
+                    QPushButton:pressed { background: #17a589; }
+                """)
+                lay.addWidget(btn)
 
-    scroll.setWidget(container)
-    return scroll
+        self._scroll.setWidget(container)
+
+
+def _make_section3() -> Section3Widget:
+    return Section3Widget()

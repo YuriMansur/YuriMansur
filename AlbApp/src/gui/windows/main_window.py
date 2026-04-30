@@ -140,23 +140,27 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(page3)
 
         page1.alarm_test.connect(self._start_alarm_blink)
+        page1.alarm_reset.connect(self._stop_alarm_blink)
 
     def _start_alarm_blink(self):
-        self._blink_count = 0
+        if hasattr(self, "_blink_timer") and self._blink_timer.isActive():
+            return
+        self._blink_state = False
         self._blink_timer = QTimer(self)
         self._blink_timer.timeout.connect(self._do_blink)
         self._blink_timer.start(250)
 
     def _do_blink(self):
-        if self._blink_count >= 10:
-            self._blink_timer.stop()
-            self.centralWidget().setStyleSheet("QWidget#main_central { border: 4px solid transparent; }")
-            return
-        if self._blink_count % 2 == 0:
+        self._blink_state = not self._blink_state
+        if self._blink_state:
             self.centralWidget().setStyleSheet("QWidget#main_central { border: 4px solid #e74c3c; }")
         else:
             self.centralWidget().setStyleSheet("QWidget#main_central { border: 4px solid transparent; }")
-        self._blink_count += 1
+
+    def _stop_alarm_blink(self):
+        if hasattr(self, "_blink_timer"):
+            self._blink_timer.stop()
+        self.centralWidget().setStyleSheet("QWidget#main_central { border: 4px solid transparent; }")
 
 # Переключение страниц
     def switch_page(self, index):

@@ -2,8 +2,8 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
 from PyQt6.QtCore import pyqtSignal
 
 from gui.windows.experiment_window.section1 import _make_section1
-from gui.windows.experiment_window.section2 import _make_section2
-from gui.windows.experiment_window.section3 import _make_section3
+from gui.windows.experiment_window.section2 import Section2Widget
+from gui.windows.experiment_window.section3 import Section3Widget
 from gui.windows.experiment_window.section4 import make_section4
 
 _FRAME_STYLE = """
@@ -16,7 +16,8 @@ _FRAME_STYLE = """
 
 
 class ExperimentWidget(QWidget):
-    alarm_test = pyqtSignal()
+    alarm_test  = pyqtSignal()
+    alarm_reset = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -26,6 +27,11 @@ class ExperimentWidget(QWidget):
 
         columns_layout = QHBoxLayout()
         columns_layout.setSpacing(2)
+
+        sec2 = Section2Widget()
+        sec3 = Section3Widget()
+        sec2.params_changed.connect(sec3.set_params)
+        sec3.set_params(sec2.cb_std.currentText(), sec2.cb_method.currentText())
 
         for i in range(1, 5):
             frame = QFrame()
@@ -38,9 +44,9 @@ class ExperimentWidget(QWidget):
             if i == 1:
                 col_layout.addWidget(_make_section1(), 1)
             elif i == 2:
-                col_layout.addWidget(_make_section2(), 1)
+                col_layout.addWidget(sec2, 1)
             elif i == 3:
-                col_layout.addWidget(_make_section3(), 1)
+                col_layout.addWidget(sec3, 1)
             elif i == 4:
                 make_section4(col_layout)
 
