@@ -31,8 +31,10 @@ _FORM_STYLE = """
     QDateTimeEdit::drop-down, QComboBox::drop-down {
         border: none;
         background: #3d5166;
-        width: 18px;
+        width: 20px;
+        border-left: 1px solid #4a6278;
     }
+
     QComboBox QAbstractItemView {
         background: #2c3e50;
         color: #ecf0f1;
@@ -154,7 +156,6 @@ class Section2Widget(QWidget):
         form2.addRow(spacer_lbl)
 
         self.cb_method = QComboBox()
-        self.cb_method.setFixedWidth(120)
         self._lbl_method = QLabel("Методика:")
         form2.addRow(self._lbl_method, self.cb_method)
 
@@ -259,5 +260,3 @@ class Section2Widget(QWidget):
         self.params_changed.emit(self.cb_std.currentText(), self.cb_method.currentText())
 
 
-def _make_section2() -> Section2Widget:
-    return Section2Widget()

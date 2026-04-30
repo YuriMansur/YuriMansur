@@ -1,10 +1,11 @@
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
-    QPushButton, QLineEdit, QToolBar, QFileDialog, QSizePolicy,
-    QSlider, QSpinBox, QTextEdit, QDialog, QDialogButtonBox,
+    QPushButton, QLineEdit, QSpinBox, QComboBox, QApplication,
 )
-from PyQt6.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QFont, QCursor
+from PyQt6.QtCore import Qt, QPoint, QRect, pyqtSignal
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QCursor
 
 try:
     import fitz  # PyMuPDF
@@ -12,14 +13,9 @@ try:
 except ImportError:
     _FITZ_OK = False
 
+_DOCS_DIR = Path(__file__).parent.parent / "docs"
 
 _TOOLBAR_STYLE = """
-    QToolBar {
-        background: #2c3e50;
-        border-bottom: 1px solid #4a6278;
-        spacing: 4px;
-        padding: 4px;
-    }
     QPushButton {
         background: #3d5166; color: #ecf0f1;
         border: 1px solid #4a6278; border-radius: 4px;
@@ -27,7 +23,6 @@ _TOOLBAR_STYLE = """
     }
     QPushButton:hover   { background: #4a6a82; }
     QPushButton:pressed { background: #2980b9; }
-    QPushButton:checked { background: #1abc9c; border-color: #1abc9c; color: #1a252f; }
     QLineEdit {
         background: #1a252f; color: #ecf0f1;
         border: 1px solid #4a6278; border-radius: 4px;
@@ -42,60 +37,32 @@ _TOOLBAR_STYLE = """
 """
 
 
-class _NoteDialog(QDialog):
-    def __init__(self, parent=None, existing=""):
-        super().__init__(parent)
-        self.setWindowTitle("Заметка")
-        self.resize(360, 200)
-        lay = QVBoxLayout(self)
-        self.edit = QTextEdit()
-        self.edit.setPlainText(existing)
-        lay.addWidget(self.edit)
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
-
-    def text(self):
-        return self.edit.toPlainText()
-
-
 class _PageLabel(QLabel):
-    """Виджет одной страницы с поддержкой аннотаций."""
+    """Страница PDF с выделением текста и копированием."""
 
-    annotation_added = pyqtSignal(int, object)  # page_idx, annot_dict
+    text_selected = pyqtSignal(str)
 
-    def __init__(self, page_idx: int, parent=None):
+    def __init__(self, page_idx: int, zoom: float, fitz_page, parent=None):
         super().__init__(parent)
-        self.page_idx   = page_idx
-        self._tool      = "none"   # "highlight" | "note" | "none"
-        self._origin    = QPoint()
-        self._selecting = False
-        self._sel_rect  = QRect()
-        self._base_pix  = QPixmap()
-        self._annots: list[dict] = []
+        self.page_idx    = page_idx
+        self._zoom       = zoom
+        self._fitz_page  = fitz_page
+        self._origin     = QPoint()
+        self._selecting  = False
+        self._sel_rect   = QRect()
+        self._sel_text   = ""
+        self._base_pix   = QPixmap()
+        self._search_rects: list[QRect] = []
         self.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.setCursor(Qt.CursorShape.ArrowCursor)
-
-    def set_tool(self, tool: str):
-        self._tool = tool
-        cur = Qt.CursorShape.IBeamCursor if tool == "highlight" else (
-              Qt.CursorShape.CrossCursor if tool == "note" else
-              Qt.CursorShape.ArrowCursor)
-        self.setCursor(QCursor(cur))
+        self.setCursor(QCursor(Qt.CursorShape.IBeamCursor))
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def set_pixmap_base(self, pix: QPixmap):
         self._base_pix = pix
         self._redraw()
 
-    def add_annotation(self, annot: dict):
-        self._annots.append(annot)
-        self._redraw()
-
-    def set_annotations(self, annots: list):
-        self._annots = list(annots)
+    def set_search_rects(self, rects: list):
+        self._search_rects = rects
         self._redraw()
 
     def _redraw(self):
@@ -103,32 +70,33 @@ class _PageLabel(QLabel):
             return
         pix = QPixmap(self._base_pix)
         painter = QPainter(pix)
-        for a in self._annots:
-            if a["type"] == "highlight":
-                painter.fillRect(a["rect"], QColor(255, 235, 59, 100))
-                painter.setPen(QPen(QColor(255, 193, 7), 1))
-                painter.drawRect(a["rect"])
-            elif a["type"] == "note":
-                r = a["rect"]
-                painter.setBrush(QColor(255, 235, 59, 180))
-                painter.setPen(QPen(QColor(180, 130, 0), 1))
-                painter.drawRect(r)
-                painter.setPen(QPen(QColor(60, 40, 0)))
-                painter.setFont(QFont("Arial", 9))
-                painter.drawText(r.adjusted(2, 2, -2, -2),
-                                 Qt.TextFlag.TextWordWrap, a.get("text", ""))
-        if self._selecting and not self._sel_rect.isNull():
-            painter.fillRect(self._sel_rect, QColor(52, 152, 219, 80))
-            painter.setPen(QPen(QColor(52, 152, 219), 1, Qt.PenStyle.DashLine))
+        for r in self._search_rects:
+            painter.fillRect(r, QColor(255, 235, 59, 120))
+            painter.setPen(QPen(QColor(255, 193, 7), 1))
+            painter.drawRect(r)
+        if not self._sel_rect.isNull():
+            painter.fillRect(self._sel_rect, QColor(52, 152, 219, 100))
+            painter.setPen(QPen(QColor(52, 152, 219), 1))
             painter.drawRect(self._sel_rect)
         painter.end()
         self.setPixmap(pix)
 
+    def _rect_to_fitz(self, rect: QRect):
+        z = self._zoom
+        return fitz.Rect(rect.left() / z, rect.top() / z,
+                         rect.right() / z, rect.bottom() / z)
+
     def mousePressEvent(self, e):
-        if self._tool in ("highlight", "note") and e.button() == Qt.MouseButton.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self._origin    = e.pos()
             self._selecting = True
             self._sel_rect  = QRect()
+            self._sel_text  = ""
+            self._redraw()
+        elif e.button() == Qt.MouseButton.RightButton:
+            self._sel_rect = QRect()
+            self._sel_text = ""
+            self._redraw()
 
     def mouseMoveEvent(self, e):
         if self._selecting:
@@ -144,30 +112,32 @@ class _PageLabel(QLabel):
             self._sel_rect = QRect()
             self._redraw()
             return
-        self._sel_rect = QRect()
+        self._sel_rect = rect
+        if self._fitz_page and _FITZ_OK:
+            self._sel_text = self._fitz_page.get_textbox(
+                self._rect_to_fitz(rect)
+            ).strip()
+        self._redraw()
 
-        if self._tool == "highlight":
-            annot = {"type": "highlight", "rect": rect}
-            self.add_annotation(annot)
-            self.annotation_added.emit(self.page_idx, annot)
-        elif self._tool == "note":
-            dlg = _NoteDialog(self)
-            if dlg.exec() == QDialog.DialogCode.Accepted and dlg.text().strip():
-                annot = {"type": "note", "rect": rect, "text": dlg.text()}
-                self.add_annotation(annot)
-                self.annotation_added.emit(self.page_idx, annot)
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_C and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if self._sel_text:
+                QApplication.clipboard().setText(self._sel_text)
+                self.text_selected.emit(self._sel_text)
+        elif e.key() == Qt.Key.Key_Escape:
+            self._sel_rect = QRect()
+            self._sel_text = ""
+            self._redraw()
 
 
 class PdfReaderWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._doc        = None
-        self._zoom       = 1.5
+        self._doc     = None
+        self._zoom    = 1.5
         self._pages: list[_PageLabel] = []
-        self._annots: dict[int, list] = {}
         self._search_results: list[tuple] = []
         self._search_idx = 0
-        self._active_tool = "none"
         self._build_ui()
 
     def _build_ui(self):
@@ -183,20 +153,28 @@ class PdfReaderWidget(QWidget):
         tb_lay.setContentsMargins(6, 4, 6, 4)
         tb_lay.setSpacing(6)
 
+        self.cb_docs = QComboBox()
+        self.cb_docs.setFixedWidth(220)
+        self.cb_docs.setStyleSheet("""
+            QComboBox {
+                background: #1a252f; color: #ecf0f1;
+                border: 1px solid #4a6278; border-radius: 4px;
+                padding: 3px 8px; font-size: 12px; min-height: 24px;
+            }
+            QComboBox::drop-down { border: none; background: #3d5166; width: 18px; }
+            QComboBox QAbstractItemView {
+                background: #1a252f; color: #ecf0f1;
+                selection-background-color: #1abc9c;
+            }
+        """)
+        self._refresh_docs()
+
         btn_open = QPushButton("📂 Открыть")
-        btn_open.clicked.connect(self._open_file)
-
-        self.btn_highlight = QPushButton("🖍 Выделить")
-        self.btn_highlight.setCheckable(True)
-        self.btn_highlight.clicked.connect(lambda c: self._set_tool("highlight" if c else "none"))
-
-        self.btn_note = QPushButton("📝 Заметка")
-        self.btn_note.setCheckable(True)
-        self.btn_note.clicked.connect(lambda c: self._set_tool("note" if c else "none"))
+        btn_open.clicked.connect(self._open_selected)
 
         btn_zoom_out = QPushButton("🔍−")
         btn_zoom_out.clicked.connect(self._zoom_out)
-        btn_zoom_in  = QPushButton("🔍+")
+        btn_zoom_in = QPushButton("🔍+")
         btn_zoom_in.clicked.connect(self._zoom_in)
 
         self.spin_zoom = QSpinBox()
@@ -205,7 +183,6 @@ class PdfReaderWidget(QWidget):
         self.spin_zoom.setSuffix("%")
         self.spin_zoom.editingFinished.connect(self._zoom_from_spin)
 
-        # поиск
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Поиск…")
         self.search_edit.setFixedWidth(180)
@@ -221,12 +198,14 @@ class PdfReaderWidget(QWidget):
         btn_next.clicked.connect(self._search_next)
         self.lbl_results = QLabel("")
 
+        self.lbl_copied = QLabel("")
+        self.lbl_copied.setStyleSheet("color: #1abc9c; font-size: 11px; background: transparent;")
+
         self.lbl_file = QLabel("Файл не открыт")
         self.lbl_file.setStyleSheet("color: #7f8c8d; font-size: 11px; background: transparent;")
 
+        tb_lay.addWidget(self.cb_docs)
         tb_lay.addWidget(btn_open)
-        tb_lay.addWidget(self.btn_highlight)
-        tb_lay.addWidget(self.btn_note)
         tb_lay.addSpacing(8)
         tb_lay.addWidget(btn_zoom_out)
         tb_lay.addWidget(self.spin_zoom)
@@ -237,6 +216,7 @@ class PdfReaderWidget(QWidget):
         tb_lay.addWidget(btn_prev)
         tb_lay.addWidget(btn_next)
         tb_lay.addWidget(self.lbl_results)
+        tb_lay.addWidget(self.lbl_copied)
         tb_lay.addStretch()
         tb_lay.addWidget(self.lbl_file)
         root.addWidget(tb)
@@ -262,19 +242,26 @@ class PdfReaderWidget(QWidget):
             lbl.setStyleSheet("color: #e74c3c; font-size: 14px; background: transparent;")
             self.pages_layout.addWidget(lbl)
 
-    def _open_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Открыть PDF", "", "PDF Files (*.pdf)"
-        )
-        if not path:
-            return
+    def _refresh_docs(self):
+        self.cb_docs.clear()
+        if _DOCS_DIR.exists():
+            for p in sorted(_DOCS_DIR.glob("*.pdf")):
+                self.cb_docs.addItem(p.stem, str(p))
+        if self.cb_docs.count() == 0:
+            self.cb_docs.addItem("— нет файлов —", None)
+
+    def _open_selected(self):
+        path = self.cb_docs.currentData()
+        if path and _FITZ_OK:
+            self._load_pdf(path)
+
+    def _load_pdf(self, path: str):
         if not _FITZ_OK:
             return
         if self._doc:
             self._doc.close()
-        self._doc    = fitz.open(path)
-        self._annots = {}
-        self.lbl_file.setText(path.split("/")[-1].split("\\")[-1])
+        self._doc = fitz.open(path)
+        self.lbl_file.setText(Path(path).name)
         self._render_all()
 
     def _render_all(self):
@@ -295,16 +282,10 @@ class PdfReaderWidget(QWidget):
                           clip.stride, QImage.Format.Format_RGB888)
             pix  = QPixmap.fromImage(img)
 
-            lbl = _PageLabel(idx)
+            lbl = _PageLabel(idx, self._zoom, page)
             lbl.set_pixmap_base(pix)
             lbl.setFixedSize(pix.size())
-            lbl.set_tool(self._active_tool)
-            lbl.set_annotations(self._annots.get(idx, []))
-            lbl.annotation_added.connect(self._on_annotation_added)
-
-            shadow = QLabel()
-            shadow.setFixedSize(pix.width() + 8, pix.height() + 8)
-            shadow.setStyleSheet("background: #0a1520; border-radius: 3px;")
+            lbl.text_selected.connect(self._on_text_selected)
 
             wrapper = QWidget()
             wrapper.setFixedSize(pix.width() + 8, pix.height() + 8)
@@ -317,17 +298,11 @@ class PdfReaderWidget(QWidget):
 
         self._highlight_search()
 
-    def _on_annotation_added(self, page_idx: int, annot: dict):
-        self._annots.setdefault(page_idx, []).append(annot)
-
-    def _set_tool(self, tool: str):
-        self._active_tool = tool
-        if tool != "highlight":
-            self.btn_highlight.setChecked(False)
-        if tool != "note":
-            self.btn_note.setChecked(False)
-        for lbl in self._pages:
-            lbl.set_tool(tool)
+    def _on_text_selected(self, text: str):
+        preview = text[:40].replace("\n", " ")
+        self.lbl_copied.setText(f"✓ Скопировано: {preview}{'…' if len(text) > 40 else ''}")
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(3000, lambda: self.lbl_copied.setText(""))
 
     def _zoom_in(self):
         self._zoom = min(4.0, self._zoom + 0.25)
@@ -351,8 +326,7 @@ class PdfReaderWidget(QWidget):
         query = self.search_edit.text().strip()
         self._search_results = []
         for idx in range(len(self._doc)):
-            hits = self._doc[idx].search_for(query)
-            for r in hits:
+            for r in self._doc[idx].search_for(query):
                 self._search_results.append((idx, r))
         self._search_idx = 0
         self._highlight_search()
@@ -375,20 +349,16 @@ class PdfReaderWidget(QWidget):
         self.lbl_results.setText(f"{self._search_idx + 1}/{len(self._search_results)}")
 
     def _highlight_search(self):
-        if not self._pages:
-            return
-        query = self.search_edit.text().strip()
+        query = self.search_edit.text().strip() if hasattr(self, "search_edit") else ""
         for idx, lbl in enumerate(self._pages):
-            extra = []
+            rects = []
             if query and self._doc:
-                hits = self._doc[idx].search_for(query)
-                for r in hits:
-                    rect = QRect(
+                for r in self._doc[idx].search_for(query):
+                    rects.append(QRect(
                         int(r.x0 * self._zoom), int(r.y0 * self._zoom),
                         int((r.x1 - r.x0) * self._zoom), int((r.y1 - r.y0) * self._zoom),
-                    )
-                    extra.append({"type": "highlight", "rect": rect})
-            lbl.set_annotations(self._annots.get(idx, []) + extra)
+                    ))
+            lbl.set_search_rects(rects)
 
     def _jump_to_result(self):
         if not self._search_results or self._search_idx >= len(self._search_results):
