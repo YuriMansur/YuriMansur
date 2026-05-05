@@ -6,51 +6,16 @@ from PyQt6.QtCore import Qt, QDateTime, pyqtSignal
 
 from gui.windows.settings_window.F_parameters import GOST_OPTIONS
 
+_ISO_10328_METHODS = ["13.2.1.2","16.2.1","16.2.2","16.2.2+С","16.2.3","17.3","17.4.3","17.4.4"]
+
 METHOD_OPTIONS = {
-    "Р53868-2021":       [],
-    "Р ИСО 10328-2021":  ["13.2.1.2","16.2.1","16.2.2","16.2.2+С","16.2.3","17.3","17.4.3","17.4.4"],
+    "Р53868-2021":       _ISO_10328_METHODS,
+    "Р ИСО 10328-2021":  _ISO_10328_METHODS,
     "Р ИСО 15032-2001":  [],
 }
 
-_FORM_STYLE = """
-    QLabel {
-        color: #ecf0f1;
-        font-size: 12px;
-        background: transparent;
-        border: none;
-    }
-    QDateTimeEdit, QComboBox, QLineEdit {
-        background: #2c3e50;
-        color: #ecf0f1;
-        border: 1px solid #4a6278;
-        border-radius: 3px;
-        padding: 3px 6px;
-        min-height: 22px;
-        font-size: 12px;
-    }
-    QDateTimeEdit::drop-down, QComboBox::drop-down {
-        border: none;
-        background: #3d5166;
-        width: 20px;
-        border-left: 1px solid #4a6278;
-    }
-
-    QComboBox QAbstractItemView {
-        background: #2c3e50;
-        color: #ecf0f1;
-        selection-background-color: #3498db;
-    }
-"""
-
-
 def _group_box(title: str, parent_layout: QVBoxLayout) -> QVBoxLayout:
     lbl = QLabel(title)
-    lbl.setStyleSheet("""
-        QLabel {
-            font-size: 13px; font-weight: bold; color: #1abc9c;
-            background: transparent; border: none; padding: 2px 0;
-        }
-    """)
     parent_layout.addWidget(lbl)
     inner = QVBoxLayout()
     inner.setContentsMargins(8, 0, 0, 4)
@@ -64,27 +29,50 @@ class Section2Widget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet("QWidget { background: transparent; }")
-
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
 
         container = QWidget()
-        container.setStyleSheet(_FORM_STYLE + "QWidget { background: transparent; }")
         container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
+        from PyQt6.QtWidgets import QPushButton, QDialog
+        btn_docs = QPushButton("📄 Документация (ГОСТ)")
+        btn_docs.setMinimumHeight(36)
+        btn_docs.setStyleSheet("font-size: 14px; padding: 6px 16px;")
+        from pathlib import Path
+        _DOCS_DIR = Path(__file__).parent.parent.parent.parent.parent / "docs"
+        btn_docs._pdf_windows = []
+
+        def _open_pdf():
+            from PyQt6.QtWidgets import QVBoxLayout
+            from pdf_reader import PdfReaderWidget
+            # убираем уже закрытые окна
+            btn_docs._pdf_windows = [w for w in btn_docs._pdf_windows if w.isVisible()]
+            max_windows = len(list(_DOCS_DIR.glob("*.pdf"))) if _DOCS_DIR.exists() else 1
+            if len(btn_docs._pdf_windows) >= max_windows:
+                btn_docs._pdf_windows[-1].raise_()
+                btn_docs._pdf_windows[-1].activateWindow()
+                return
+            dlg = QDialog(btn_docs.window())
+            dlg.setWindowTitle(f"Документация [{len(btn_docs._pdf_windows) + 1}]")
+            dlg.setModal(False)
+            dlg.resize(1100, 800)
+            dlg_lay = QVBoxLayout(dlg)
+            dlg_lay.setContentsMargins(0, 0, 0, 0)
+            dlg_lay.addWidget(PdfReaderWidget())
+            btn_docs._pdf_windows.append(dlg)
+            dlg.show()
+        btn_docs.clicked.connect(_open_pdf)
+        layout.addWidget(btn_docs)
+
+        layout.addSpacing(20)
+
         # ── Параметры оборудования стенда ────────────────────────────────────
         lbl_stand_title = QLabel("Параметры оборудования стенда")
-        lbl_stand_title.setStyleSheet("""
-            QLabel {
-                font-size: 15px; font-weight: bold; color: #1abc9c;
-                background: transparent; border: none; padding: 4px 0;
-            }
-        """)
         layout.addWidget(lbl_stand_title)
 
         grp_stand = QVBoxLayout()
@@ -99,7 +87,6 @@ class Section2Widget(QWidget):
         except (FileNotFoundError, ValueError):
             _si = {}
 
-        _item_style = "font-size: 13px; background: transparent; border: none;"
         for label, key in [
             ("Марка и модель стенда:",  "stand_model"),
             ("Серийный номер стенда:",  "stand_serial"),
@@ -109,8 +96,8 @@ class Section2Widget(QWidget):
         ]:
             row = QHBoxLayout()
             row.setSpacing(10)
-            lk = QLabel(label); lk.setStyleSheet(_item_style)
-            lv = QLabel(_si.get(key, "")); lv.setStyleSheet(_item_style)
+            lk = QLabel(label)
+            lv = QLabel(_si.get(key, ""))
             row.addWidget(lk)
             row.addWidget(lv, 1)
             grp_stand.addLayout(row)
@@ -139,6 +126,8 @@ class Section2Widget(QWidget):
 
         self.cb_cond = QComboBox()
         self._lbl_cond = QLabel("Условие нагружения:")
+        for w in (self.cb_cond, self._lbl_cond):
+            sp = w.sizePolicy(); sp.setRetainSizeWhenHidden(True); w.setSizePolicy(sp)
         form2.addRow(self._lbl_cond, self.cb_cond)
 
         _F_KEYS = ["Fset", "Fsp", "Fstab", "F_su_lower_level", "F_su_upper_level"]
@@ -147,6 +136,8 @@ class Section2Widget(QWidget):
         for key in _F_KEYS:
             le  = QLineEdit(); le.setReadOnly(True)
             lbl = QLabel(f"{key}:")
+            sp = le.sizePolicy(); sp.setRetainSizeWhenHidden(True); le.setSizePolicy(sp)
+            sp = lbl.sizePolicy(); sp.setRetainSizeWhenHidden(True); lbl.setSizePolicy(sp)
             self._f_edits[key]  = le
             self._f_labels[key] = lbl
             form2.addRow(lbl, le)
@@ -162,6 +153,8 @@ class Section2Widget(QWidget):
         self._form2 = form2
         grp2.addLayout(form2)
 
+        layout.addSpacing(20)
+
         # ── Информация об образце ─────────────────────────────────────────────
         grp1 = _group_box("Информация об исследуемом образце", layout)
         form1 = QFormLayout()
@@ -169,11 +162,11 @@ class Section2Widget(QWidget):
         form1.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         dt1 = QDateTimeEdit(QDateTime.currentDateTime())
-        dt1.setDisplayFormat("dd.MM.yyyy HH:mm:ss"); dt1.setCalendarPopup(True)
+        dt1.setDisplayFormat("dd.MM.yyyy"); dt1.setCalendarPopup(True)
         form1.addRow("Дата получения образца на:", dt1)
 
         dt2 = QDateTimeEdit(QDateTime.currentDateTime())
-        dt2.setDisplayFormat("dd.MM.yyyy HH:mm:ss"); dt2.setCalendarPopup(True)
+        dt2.setDisplayFormat("dd.MM.yyyy"); dt2.setCalendarPopup(True)
         form1.addRow("Дата проведения:", dt2)
 
         cb_used = QComboBox(); cb_used.addItems(["", "Да", "Нет"])
@@ -201,30 +194,26 @@ class Section2Widget(QWidget):
 
     def _fill_load(self, gost: str):
         opts = GOST_OPTIONS.get(gost, {})
-        _tc = "QComboBox{color:transparent;background:transparent;border-color:transparent;}QComboBox::drop-down{border-color:transparent;background:transparent;}"
-        _tl = "color:transparent;background:transparent;border:none;"
 
         self.cb_load.blockSignals(True)
         self.cb_load.clear()
         self.cb_load.addItems(opts.get("items", []))
         self.cb_load.blockSignals(False)
 
+        has_i_ii = bool(opts.get("i_ii"))
         self.cb_cond.blockSignals(True)
         self.cb_cond.clear()
-        if opts.get("i_ii"):
+        if has_i_ii:
             self.cb_cond.addItems(["I", "II"])
-            self.cb_cond.setStyleSheet("")
-            self._lbl_cond.setStyleSheet("")
-        else:
-            self.cb_cond.setStyleSheet(_tc)
-            self._lbl_cond.setStyleSheet(_tl)
+        _hide = "color: transparent; background: transparent; border-color: transparent;"
+        self.cb_cond.setStyleSheet("" if has_i_ii else _hide)
+        self.cb_cond.setEnabled(has_i_ii)
+        self._lbl_cond.setStyleSheet("" if has_i_ii else "color: transparent;")
         self.cb_cond.blockSignals(False)
 
         self.cb_method.blockSignals(True)
         self.cb_method.clear()
         self.cb_method.addItems(METHOD_OPTIONS.get(gost, []))
-        self.cb_method.setStyleSheet("")
-        self._lbl_method.setStyleSheet("")
         self.cb_method.blockSignals(False)
 
         self._refresh_f()
@@ -245,15 +234,16 @@ class Section2Widget(QWidget):
             vals = data[gost][p_key][i_ii] if opts.get("i_ii") else data[gost][p_key]
         except KeyError:
             vals = {}
-        _te = "color:transparent;background:transparent;border-color:transparent;"
-        _tl = "color:transparent;background:transparent;border:none;"
+        _hide = "color: transparent; background: transparent; border-color: transparent;"
         for key, le in self._f_edits.items():
-            if key in visible:
-                le.setStyleSheet(""); self._f_labels[key].setStyleSheet("")
+            show = key in visible
+            le.setStyleSheet("" if show else _hide)
+            le.setEnabled(show)
+            self._f_labels[key].setStyleSheet("" if show else "color: transparent;")
+            if show:
                 v = vals.get(key) if vals else None
                 le.setText(str(v) if v is not None else "")
             else:
-                le.setStyleSheet(_te); self._f_labels[key].setStyleSheet(_tl)
                 le.setText("")
 
     def _emit_params(self):

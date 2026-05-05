@@ -272,7 +272,7 @@ class TrendsWiget(QWidget):
         self._time_axis  = _TimeAxisItem(orientation="bottom")
         self.plot_widget = pg.PlotWidget(
             axisItems={"bottom": self._time_axis})
-        self.plot_widget.setBackground("w")
+        self.plot_widget.setBackground("#2c2c2c")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         _auto_btn = self.plot_widget.getPlotItem().autoBtn
         _auto_btn.hide()
@@ -953,6 +953,20 @@ from(bucket: "{INFLUX_BUCKET}")
                     yield self._channels[ch_id]['name'], xs, ys
 
     # ── контекстное меню графика ──────────────────────────────────────────────
+
+    def set_theme(self, dark: bool):
+        if dark:
+            self.plot_widget.setBackground("#2c2c2c")
+            self.plot_widget.getAxis("left").setPen(pg.mkPen("#aaaaaa"))
+            self.plot_widget.getAxis("bottom").setPen(pg.mkPen("#aaaaaa"))
+            self.plot_widget.getAxis("left").setTextPen(pg.mkPen("#aaaaaa"))
+            self.plot_widget.getAxis("bottom").setTextPen(pg.mkPen("#aaaaaa"))
+        else:
+            self.plot_widget.setBackground("#f5f5f5")
+            self.plot_widget.getAxis("left").setPen(pg.mkPen("#333333"))
+            self.plot_widget.getAxis("bottom").setPen(pg.mkPen("#333333"))
+            self.plot_widget.getAxis("left").setTextPen(pg.mkPen("#333333"))
+            self.plot_widget.getAxis("bottom").setTextPen(pg.mkPen("#333333"))
 
     def _build_graph_context_menu(self):
         menu = self.plot_widget.getViewBox().menu

@@ -22,6 +22,10 @@ def _make_plot(title: str, color: str) -> pg.PlotWidget:
     return pw
 
 
-def make_section4(parent_layout: QVBoxLayout) -> None:
+def make_section4(parent_layout: QVBoxLayout) -> list:
+    plots = []
     for title, color in zip(_CHART_TITLES, _CH_COLORS):
-        parent_layout.addWidget(_make_plot(title, color), 1)
+        pw = _make_plot(title, color)
+        parent_layout.addWidget(pw, 1)
+        plots.append(pw)
+    return plots

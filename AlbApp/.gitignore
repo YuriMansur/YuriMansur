@@ -21,3 +21,5 @@ Thumbs.db
 
 # InfluxDB binary (too large for GitHub)
 influxdb/
+
+docs/

@@ -4,28 +4,6 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-_STYLE = """
-    QWidget { background: transparent; }
-    QLabel  { color: #ecf0f1; font-size: 12px; background: transparent; border: none; }
-    QPushButton {
-        background: #3d5166; color: #ecf0f1;
-        border: 1px solid #4a6278; border-radius: 3px;
-        padding: 4px 12px; min-height: 24px; font-size: 12px;
-    }
-    QPushButton:hover  { background: #4a6a82; }
-    QPushButton:pressed { background: #2980b9; }
-    QComboBox {
-        background: #2c3e50; color: #ecf0f1;
-        border: 1px solid #4a6278; border-radius: 3px;
-        padding: 3px 6px; min-height: 22px; font-size: 12px;
-    }
-    QSpinBox {
-        background: #2c3e50; color: #ecf0f1;
-        border: 1px solid #4a6278; border-radius: 3px;
-        padding: 3px 6px; min-height: 22px; font-size: 12px; min-width: 60px;
-    }
-"""
-
 # Процедуры: ключ — (gost, method), значение — список шагов.
 # Каждый шаг: dict с полями:
 #   type: "title" | "subtitle" | "info" | "step" | "button" | "f0row" | "protocol"
@@ -70,7 +48,6 @@ class Section3Widget(QWidget):
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         root.addWidget(self._scroll)
 
         self._gost   = ""
@@ -88,7 +65,6 @@ class Section3Widget(QWidget):
         steps = PROCEDURES.get((self._gost, self._method), _DEFAULT_PROCEDURE)
 
         container = QWidget()
-        container.setStyleSheet(_STYLE)
         lay = QVBoxLayout(container)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(10)
@@ -98,13 +74,11 @@ class Section3Widget(QWidget):
 
             if t == "title":
                 lbl = QLabel(step["text"])
-                lbl.setStyleSheet("color: #e67e22; font-size: 13px; font-weight: bold; background: transparent; border: none;")
                 lbl.setWordWrap(True)
                 lay.addWidget(lbl)
 
             elif t == "subtitle":
                 lbl = QLabel(step["text"])
-                lbl.setStyleSheet("color: #1abc9c; font-size: 13px; font-weight: bold; background: transparent; border: none;")
                 lay.addWidget(lbl)
 
             elif t == "info":
@@ -122,7 +96,6 @@ class Section3Widget(QWidget):
 
             elif t == "step":
                 num_lbl = QLabel(f"{step['num']}.")
-                num_lbl.setStyleSheet("color: #e67e22; font-size: 12px; font-weight: bold; background: transparent; border: none;")
                 desc_lbl = QLabel(step["desc"])
                 desc_lbl.setWordWrap(True)
                 row = QHBoxLayout()
@@ -134,22 +107,12 @@ class Section3Widget(QWidget):
 
             elif t == "button":
                 lbl = QLabel(step["num"])
-                lbl.setStyleSheet("color: #e67e22; font-size: 12px; font-weight: bold; background: transparent; border: none;")
                 lay.addWidget(lbl)
                 lay.addWidget(QPushButton(step["text"]))
 
             elif t == "protocol":
                 lay.addStretch()
                 btn = QPushButton("Сформировать Протокол")
-                btn.setStyleSheet("""
-                    QPushButton {
-                        background: #2c3e50; color: #ecf0f1;
-                        border: 2px solid #1abc9c; border-radius: 4px;
-                        padding: 10px; font-size: 14px; font-weight: bold;
-                    }
-                    QPushButton:hover  { background: #1abc9c; color: #1a252f; }
-                    QPushButton:pressed { background: #17a589; }
-                """)
                 lay.addWidget(btn)
 
         self._scroll.setWidget(container)

@@ -5,16 +5,19 @@ from PyQt6.QtGui import QColor
 class NavigationButton(QPushButton):
     def __init__(self, text, color):
         super().__init__(text)
-        # Сохранение цвета кнопки
         self.color = color
-        # Фиксированная высота кнопки
+        self._text_color = "#ecf0f1"
+        self._underline_color = "#ecf0f1"
         self.setFixedHeight(40)
-        # Курсор при наведении
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Базовые стили
         self.update_style(False)
     
     # Обновление стиля в зависимости от состояния активности
+    def set_text_color(self, color: str):
+        self._text_color = color
+        self._underline_color = color
+        self.update_style(self.isChecked())
+
     def update_style(self, active):
         if active:
             style = f"""
@@ -24,7 +27,7 @@ class NavigationButton(QPushButton):
                     border: none;
                     padding: 10px 20px;
                     font-weight: bold;
-                    border-bottom: 3px solid white;
+                    border-bottom: 3px solid {self._underline_color};
                     margin: 0 2px;
                 }}
                 QPushButton:hover {{
@@ -35,14 +38,14 @@ class NavigationButton(QPushButton):
             style = f"""
                 QPushButton {{
                     background-color: transparent;
-                    color: #ecf0f1;
+                    color: {self._text_color};
                     border: none;
                     padding: 10px 20px;
                     margin: 0 2px;
                 }}
                 QPushButton:hover {{
-                    background-color: rgba(255, 255, 255, 0.1);
-                    color: white;
+                    background-color: rgba(128, 128, 128, 0.15);
+                    color: {self._text_color};
                     border-bottom: 3px solid {self.color};
                 }}
             """

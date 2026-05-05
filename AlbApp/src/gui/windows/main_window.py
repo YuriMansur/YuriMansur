@@ -63,20 +63,13 @@ class MainWindow(QMainWindow):
 
         # Устанавливаем первую страницу активной
         self.switch_page(0)
+        QTimer.singleShot(0, self.apply_theme)
         
 #Создание верхней панели навигации
     def create_top_navigation(self):
 
         # Создание виджета верхней панели
         self.top_nav_panel = QWidget()
-
-        # Стилизация верхне панели
-        self.top_nav_panel.setStyleSheet("""
-            QWidget {
-                background-color: #34495e;
-                border-bottom: 3px solid #3498db;
-            }
-        """)
 
         # Создание основного лэйаута панели навигации
         nav_layout = QHBoxLayout(self.top_nav_panel)
@@ -118,6 +111,15 @@ class MainWindow(QMainWindow):
         # Добавление растяжки для выравнивания кнопок влево
         nav_layout.addStretch()
 
+        # Тогл светлой/тёмной темы справа
+        from PyQt6.QtWidgets import QPushButton
+        self._dark_mode = True
+        self._btn_theme = QPushButton("🌙")
+        self._btn_theme.setFixedSize(36, 36)
+        self._btn_theme.setToolTip("Переключить тему")
+        self._btn_theme.clicked.connect(self._toggle_theme)
+        nav_layout.addWidget(self._btn_theme)
+
 #Создание страниц
     def create_pages(self):
 
@@ -156,6 +158,84 @@ class MainWindow(QMainWindow):
             self.centralWidget().setStyleSheet("QWidget#main_central { border: 4px solid #e74c3c; }")
         else:
             self.centralWidget().setStyleSheet("QWidget#main_central { border: 4px solid transparent; }")
+
+    @staticmethod
+    def _dark_palette():
+        from PyQt6.QtGui import QPalette, QColor
+        D = QColor
+        p = QPalette()
+        # Основные
+        p.setColor(QPalette.ColorRole.Window,          D(30,  30,  30))
+        p.setColor(QPalette.ColorRole.WindowText,      D(224, 224, 224))
+        p.setColor(QPalette.ColorRole.Base,            D(22,  22,  22))
+        p.setColor(QPalette.ColorRole.AlternateBase,   D(40,  40,  40))
+        p.setColor(QPalette.ColorRole.Text,            D(224, 224, 224))
+        p.setColor(QPalette.ColorRole.PlaceholderText, D(120, 120, 120))
+        p.setColor(QPalette.ColorRole.Button,          D(45,  45,  45))
+        p.setColor(QPalette.ColorRole.ButtonText,      D(224, 224, 224))
+        p.setColor(QPalette.ColorRole.BrightText,      D(255, 100, 100))
+        p.setColor(QPalette.ColorRole.Link,            D(82,  152, 255))
+        p.setColor(QPalette.ColorRole.Highlight,       D(42,  130, 218))
+        p.setColor(QPalette.ColorRole.HighlightedText, D(255, 255, 255))
+        p.setColor(QPalette.ColorRole.ToolTipBase,     D(50,  50,  50))
+        p.setColor(QPalette.ColorRole.ToolTipText,     D(224, 224, 224))
+        p.setColor(QPalette.ColorRole.Mid,             D(60,  60,  60))
+        p.setColor(QPalette.ColorRole.Dark,            D(20,  20,  20))
+        p.setColor(QPalette.ColorRole.Shadow,          D(0,   0,   0))
+        # Disabled
+        g = QPalette.ColorGroup.Disabled
+        p.setColor(g, QPalette.ColorRole.WindowText,  D(100, 100, 100))
+        p.setColor(g, QPalette.ColorRole.Text,        D(100, 100, 100))
+        p.setColor(g, QPalette.ColorRole.ButtonText,  D(100, 100, 100))
+        p.setColor(g, QPalette.ColorRole.Highlight,   D(60,  60,  60))
+        return p
+
+    @staticmethod
+    def _light_palette():
+        from PyQt6.QtGui import QPalette, QColor
+        D = QColor
+        p = QPalette()
+        p.setColor(QPalette.ColorRole.Window,          D(240, 240, 240))
+        p.setColor(QPalette.ColorRole.WindowText,      D(20,  20,  20))
+        p.setColor(QPalette.ColorRole.Base,            D(255, 255, 255))
+        p.setColor(QPalette.ColorRole.AlternateBase,   D(233, 233, 233))
+        p.setColor(QPalette.ColorRole.Text,            D(20,  20,  20))
+        p.setColor(QPalette.ColorRole.PlaceholderText, D(160, 160, 160))
+        p.setColor(QPalette.ColorRole.Button,          D(225, 225, 225))
+        p.setColor(QPalette.ColorRole.ButtonText,      D(20,  20,  20))
+        p.setColor(QPalette.ColorRole.BrightText,      D(200, 0,   0))
+        p.setColor(QPalette.ColorRole.Link,            D(0,   100, 200))
+        p.setColor(QPalette.ColorRole.Highlight,       D(42,  130, 218))
+        p.setColor(QPalette.ColorRole.HighlightedText, D(255, 255, 255))
+        p.setColor(QPalette.ColorRole.ToolTipBase,     D(255, 255, 220))
+        p.setColor(QPalette.ColorRole.ToolTipText,     D(20,  20,  20))
+        p.setColor(QPalette.ColorRole.Mid,             D(180, 180, 180))
+        p.setColor(QPalette.ColorRole.Dark,            D(160, 160, 160))
+        p.setColor(QPalette.ColorRole.Shadow,          D(100, 100, 100))
+        g = QPalette.ColorGroup.Disabled
+        p.setColor(g, QPalette.ColorRole.WindowText,  D(150, 150, 150))
+        p.setColor(g, QPalette.ColorRole.Text,        D(150, 150, 150))
+        p.setColor(g, QPalette.ColorRole.ButtonText,  D(150, 150, 150))
+        p.setColor(g, QPalette.ColorRole.Highlight,   D(200, 200, 200))
+        return p
+
+    def apply_theme(self):
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        app.setPalette(self._dark_palette() if self._dark_mode else self._light_palette())
+        text_color = "#ecf0f1" if self._dark_mode else "#1a1a1a"
+        for btn in self.nav_buttons:
+            btn.set_text_color(text_color)
+        if hasattr(self, "stacked_widget"):
+            for i in range(self.stacked_widget.count()):
+                w = self.stacked_widget.widget(i)
+                if hasattr(w, "set_theme"):
+                    w.set_theme(self._dark_mode)
+
+    def _toggle_theme(self):
+        self._dark_mode = not self._dark_mode
+        self._btn_theme.setText("🌙" if self._dark_mode else "☀️")
+        self.apply_theme()
 
     def _stop_alarm_blink(self):
         if hasattr(self, "_blink_timer"):

@@ -15,27 +15,6 @@ except ImportError:
 
 _DOCS_DIR = Path(__file__).parent.parent / "docs"
 
-_TOOLBAR_STYLE = """
-    QPushButton {
-        background: #3d5166; color: #ecf0f1;
-        border: 1px solid #4a6278; border-radius: 4px;
-        padding: 4px 10px; font-size: 12px; min-height: 24px;
-    }
-    QPushButton:hover   { background: #4a6a82; }
-    QPushButton:pressed { background: #2980b9; }
-    QLineEdit {
-        background: #1a252f; color: #ecf0f1;
-        border: 1px solid #4a6278; border-radius: 4px;
-        padding: 3px 8px; font-size: 12px; min-height: 24px;
-    }
-    QSpinBox {
-        background: #1a252f; color: #ecf0f1;
-        border: 1px solid #4a6278; border-radius: 4px;
-        padding: 2px 4px; font-size: 12px; min-width: 52px;
-    }
-    QLabel { color: #ecf0f1; font-size: 12px; background: transparent; }
-"""
-
 
 class _PageLabel(QLabel):
     """Страница PDF с выделением текста и копированием."""
@@ -134,39 +113,25 @@ class PdfReaderWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._doc     = None
-        self._zoom    = 1.5
+        self._zoom    = 2.0
         self._pages: list[_PageLabel] = []
         self._search_results: list[tuple] = []
         self._search_idx = 0
         self._build_ui()
 
     def _build_ui(self):
-        self.setStyleSheet("background: #1a252f;")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         # ── Тулбар ──────────────────────────────────────────────────────────
         tb = QWidget()
-        tb.setStyleSheet(_TOOLBAR_STYLE)
         tb_lay = QHBoxLayout(tb)
         tb_lay.setContentsMargins(6, 4, 6, 4)
         tb_lay.setSpacing(6)
 
         self.cb_docs = QComboBox()
         self.cb_docs.setFixedWidth(220)
-        self.cb_docs.setStyleSheet("""
-            QComboBox {
-                background: #1a252f; color: #ecf0f1;
-                border: 1px solid #4a6278; border-radius: 4px;
-                padding: 3px 8px; font-size: 12px; min-height: 24px;
-            }
-            QComboBox::drop-down { border: none; background: #3d5166; width: 18px; }
-            QComboBox QAbstractItemView {
-                background: #1a252f; color: #ecf0f1;
-                selection-background-color: #1abc9c;
-            }
-        """)
         self._refresh_docs()
 
         btn_open = QPushButton("📂 Открыть")
@@ -178,7 +143,7 @@ class PdfReaderWidget(QWidget):
         btn_zoom_in.clicked.connect(self._zoom_in)
 
         self.spin_zoom = QSpinBox()
-        self.spin_zoom.setRange(25, 400)
+        self.spin_zoom.setRange(25, 600)
         self.spin_zoom.setValue(int(self._zoom * 100))
         self.spin_zoom.setSuffix("%")
         self.spin_zoom.editingFinished.connect(self._zoom_from_spin)
@@ -199,10 +164,8 @@ class PdfReaderWidget(QWidget):
         self.lbl_results = QLabel("")
 
         self.lbl_copied = QLabel("")
-        self.lbl_copied.setStyleSheet("color: #1abc9c; font-size: 11px; background: transparent;")
 
         self.lbl_file = QLabel("Файл не открыт")
-        self.lbl_file.setStyleSheet("color: #7f8c8d; font-size: 11px; background: transparent;")
 
         tb_lay.addWidget(self.cb_docs)
         tb_lay.addWidget(btn_open)
@@ -224,10 +187,7 @@ class PdfReaderWidget(QWidget):
         # ── Область страниц ─────────────────────────────────────────────────
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setStyleSheet("QScrollArea { border: none; background: #12202b; }")
-
         self.pages_container = QWidget()
-        self.pages_container.setStyleSheet("background: #12202b;")
         self.pages_layout = QVBoxLayout(self.pages_container)
         self.pages_layout.setContentsMargins(20, 20, 20, 20)
         self.pages_layout.setSpacing(12)
@@ -239,7 +199,6 @@ class PdfReaderWidget(QWidget):
         if not _FITZ_OK:
             lbl = QLabel("PyMuPDF не установлен.\nВыполните: pip install pymupdf")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet("color: #e74c3c; font-size: 14px; background: transparent;")
             self.pages_layout.addWidget(lbl)
 
     def _refresh_docs(self):
@@ -277,7 +236,7 @@ class PdfReaderWidget(QWidget):
         mat = fitz.Matrix(self._zoom, self._zoom)
         for idx in range(len(self._doc)):
             page = self._doc[idx]
-            clip = page.get_pixmap(matrix=mat, alpha=False)
+            clip = page.get_pixmap(matrix=mat, alpha=False, colorspace=fitz.csRGB)
             img  = QImage(clip.samples, clip.width, clip.height,
                           clip.stride, QImage.Format.Format_RGB888)
             pix  = QPixmap.fromImage(img)
@@ -366,14 +325,3 @@ class PdfReaderWidget(QWidget):
         page_idx, _ = self._search_results[self._search_idx]
         if page_idx < len(self._pages):
             self.scroll.ensureWidgetVisible(self._pages[page_idx])
-
-
-if __name__ == "__main__":
-    import sys
-    from PyQt6.QtWidgets import QApplication
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    w = PdfReaderWidget()
-    w.resize(1000, 800)
-    w.show()
-    sys.exit(app.exec())

@@ -131,7 +131,6 @@ class TenzaProc:
         try:
             self._write_api.write(bucket=self._bucket, org=self._org, record=all_points)
             vals = [float(self._array[idx]) for idx in indices if idx < len(self._array)]
-            print(f"[DB tenza] cc={curr} prev={prev} n={len(vals)}")
         except Exception as e:
             print(f"[TenzaProc] write error: {e}")
             self._last_ts = None
@@ -249,7 +248,6 @@ class DisplacementProc:
         try:
             self._write_api.write(bucket=self._bucket, org=self._org, record=points)
             vals = [float(self._array[idx]) for idx in indices if idx < len(self._array)]
-            print(f"[DB displacement] cc={curr} prev={prev} n={len(vals)}")
         except Exception as e:
             print(f"[DisplacementProc] write error: {e}")
             self._last_ts = None
