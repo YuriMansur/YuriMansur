@@ -14,8 +14,11 @@ METHOD_OPTIONS = {
     "Р ИСО 15032-2001":  [],
 }
 
+_TITLE_STYLE = "font-size: 15px; font-weight: bold; color: #1abc9c;"
+
 def _group_box(title: str, parent_layout: QVBoxLayout) -> QVBoxLayout:
     lbl = QLabel(title)
+    lbl.setStyleSheet(_TITLE_STYLE)
     parent_layout.addWidget(lbl)
     inner = QVBoxLayout()
     inner.setContentsMargins(8, 0, 0, 4)
@@ -42,7 +45,7 @@ class Section2Widget(QWidget):
         from PyQt6.QtWidgets import QPushButton, QDialog
         btn_docs = QPushButton("📄 Документация (ГОСТ)")
         btn_docs.setMinimumHeight(36)
-        btn_docs.setStyleSheet("font-size: 14px; padding: 6px 16px;")
+        btn_docs.setStyleSheet("font-size: 14px; padding: 6px 16px; border: 2px solid #1abc9c; border-radius: 4px;")
         from pathlib import Path
         _DOCS_DIR = Path(__file__).parent.parent.parent.parent.parent / "docs"
         btn_docs._pdf_windows = []
@@ -73,6 +76,7 @@ class Section2Widget(QWidget):
 
         # ── Параметры оборудования стенда ────────────────────────────────────
         lbl_stand_title = QLabel("Параметры оборудования стенда")
+        lbl_stand_title.setStyleSheet(_TITLE_STYLE)
         layout.addWidget(lbl_stand_title)
 
         grp_stand = QVBoxLayout()
@@ -169,10 +173,10 @@ class Section2Widget(QWidget):
         dt2.setDisplayFormat("dd.MM.yyyy"); dt2.setCalendarPopup(True)
         form1.addRow("Дата проведения:", dt2)
 
-        cb_used = QComboBox(); cb_used.addItems(["", "Да", "Нет"])
+        cb_used = QComboBox(); cb_used.addItems(["Нет", "Да"])
         form1.addRow("Образец используется:", cb_used)
 
-        cb_replace = QComboBox(); cb_replace.addItems(["", "Да", "Нет"])
+        cb_replace = QComboBox(); cb_replace.addItems(["Нет", "Да"])
         form1.addRow("Образец используется взамен\nразрушенного:", cb_replace)
 
         le_clamp = QLineEdit(); le_clamp.setPlaceholderText("Введите значение")

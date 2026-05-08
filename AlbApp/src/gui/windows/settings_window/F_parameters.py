@@ -6,7 +6,13 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QLineEdit,
     QPushButton,
+    QLabel,
+    QFrame,
 )
+
+_SECTION_STYLE = "QFrame#section { border: 1px solid #555555; border-radius: 4px; }"
+
+_TITLE_STYLE = "font-size: 15px; font-weight: bold; color: #9b59b6;"
 import json
 
 # Все поля формы — порядок определяет порядок отображения
@@ -49,14 +55,23 @@ class FWindow(QWidget):
         self.setMinimumSize(400, 300)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
 
         row_layout = QHBoxLayout()
-        row_layout.setSpacing(16)
+        row_layout.setSpacing(32)
+        row_layout.setAlignment(__import__('PyQt6.QtCore', fromlist=['Qt']).Qt.AlignmentFlag.AlignTop)
 
         # ── Левая колонка: параметры F ──────────────────────────────────────
-        content_layout = QVBoxLayout()
-        content_layout.setSpacing(4)
+        content_frame = QFrame()
+        content_frame.setObjectName("section")
+        content_frame.setStyleSheet("QFrame#section { border: 1px solid #555555; border-radius: 4px; }")
+        content_layout = QVBoxLayout(content_frame)
+        content_layout.setSpacing(8)
         content_layout.setContentsMargins(8, 8, 8, 8)
+
+        lbl_params = QLabel("Параметры испытания")
+        lbl_params.setStyleSheet(_TITLE_STYLE)
+        content_layout.addWidget(lbl_params)
 
         self.combo_gost = QComboBox()
         self.combo_gost.addItems(GOST_OPTIONS.keys())
@@ -70,49 +85,64 @@ class FWindow(QWidget):
         self.combo_I_II.currentTextChanged.connect(self.update_fields)
 
         self.form = QFormLayout()
-        self.form.setVerticalSpacing(3)
-        self.form.setHorizontalSpacing(6)
+        self.form.setVerticalSpacing(6)
+        self.form.setHorizontalSpacing(8)
         self.inputs = {}
         for name in FIELDS:
             inp = QLineEdit()
             self.inputs[name] = inp
             self.form.addRow(f"{name}:", inp)
+            lbl_widget = self.form.labelForField(inp)
+            if lbl_widget:
+                lbl_widget.setStyleSheet("color: #cccccc;")
 
-        button_write = QPushButton("Записать")
-        button_write.clicked.connect(self.save_params)
+        self._btn_write = QPushButton("Записать")
+        self._btn_write.clicked.connect(self.save_params)
 
         content_layout.addWidget(self.combo_gost)
         content_layout.addWidget(self.combo_p)
         content_layout.addWidget(self.combo_I_II)
         content_layout.addLayout(self.form)
-        content_layout.addWidget(button_write)
-        content_layout.addStretch()
+        content_layout.addWidget(self._btn_write)
 
         # ── Правая колонка: сведения о стенде ───────────────────────────────
-        stand_layout = QVBoxLayout()
-        stand_layout.setSpacing(4)
+        stand_frame = QFrame()
+        stand_frame.setObjectName("section")
+        stand_frame.setStyleSheet("QFrame#section { border: 1px solid #555555; border-radius: 4px; }")
+        stand_layout = QVBoxLayout(stand_frame)
+        stand_layout.setSpacing(8)
         stand_layout.setContentsMargins(8, 8, 8, 8)
 
+        lbl_stand = QLabel("Параметры оборудования стенда")
+        lbl_stand.setStyleSheet(_TITLE_STYLE)
+        stand_layout.addWidget(lbl_stand)
+
         self.stand_form = QFormLayout()
-        self.stand_form.setVerticalSpacing(3)
-        self.stand_form.setHorizontalSpacing(6)
+        self.stand_form.setVerticalSpacing(6)
+        self.stand_form.setHorizontalSpacing(8)
         self.stand_inputs = {}
         for label, key in STAND_FIELDS:
             inp = QLineEdit()
             self.stand_inputs[key] = inp
+            lbl = self.stand_form.labelForField(inp) if False else None
             self.stand_form.addRow(label, inp)
+            lbl_widget = self.stand_form.labelForField(inp)
+            if lbl_widget:
+                lbl_widget.setStyleSheet("color: #cccccc;")
 
-        button_stand = QPushButton("Записать")
-        button_stand.clicked.connect(self.save_stand_info)
+        self._btn_stand = QPushButton("Записать")
+        self._btn_stand.clicked.connect(self.save_stand_info)
 
         stand_layout.addLayout(self.stand_form)
-        stand_layout.addWidget(button_stand)
-        stand_layout.addStretch()
+        stand_layout.addWidget(self._btn_stand)
 
-        row_layout.addLayout(content_layout)
-        row_layout.addLayout(stand_layout)
+        from PyQt6.QtCore import Qt as _Qt
+        row_layout.addWidget(content_frame, 0, _Qt.AlignmentFlag.AlignTop)
+        row_layout.addWidget(stand_frame,   0, _Qt.AlignmentFlag.AlignTop)
 
         layout.addLayout(row_layout)
+        layout.addStretch()
+        self._row_layout = row_layout
 
         # Заполняем combo_p и combo_I_II по первому ГОСТу при старте
         self._fill_combo_p(self.combo_gost.currentText())
@@ -205,3 +235,42 @@ class FWindow(QWidget):
         data["stand_info"] = {key: inp.text() for key, inp in self.stand_inputs.items()}
         with open("params.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def set_theme(self, dark: bool):
+        text   = "#ecf0f1" if dark else "#1a1a1a"
+        muted  = "#cccccc" if dark else "#555555"
+        border = "#555555" if dark else "#cccccc"
+        bg     = "#2c2c2c" if dark else "#ffffff"
+        btn_bg = "#3d3d3d" if dark else "#b0b0b0"
+        btn_hover = "#4a4a4a" if dark else "#c8c8c8"
+        btn_text = "#ecf0f1" if dark else "#1a1a1a"
+
+        self.setStyleSheet(f"""
+            QComboBox {{
+                color: {text};
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 3px;
+                padding: 2px 6px;
+            }}
+            QLineEdit {{
+                color: {text};
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 3px;
+                padding: 2px 6px;
+            }}
+            QPushButton {{
+                background: {btn_bg};
+                color: {btn_text};
+                border-radius: 4px;
+                min-height: 30px;
+            }}
+            QPushButton:hover {{ background: {btn_hover}; }}
+        """)
+
+        for form in (self.form, self.stand_form):
+            for i in range(form.rowCount()):
+                lbl = form.itemAt(i, QFormLayout.ItemRole.LabelRole)
+                if lbl and lbl.widget():
+                    lbl.widget().setStyleSheet(f"color: {muted};")

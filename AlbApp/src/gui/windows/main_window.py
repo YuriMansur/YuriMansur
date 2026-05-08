@@ -114,6 +114,19 @@ class MainWindow(QMainWindow):
         # Тогл светлой/тёмной темы справа
         from PyQt6.QtWidgets import QPushButton
         self._dark_mode = True
+
+        self._btn_alarm_nav = QPushButton("⚠ Тест аварии")
+        self._btn_alarm_nav.setFixedHeight(36)
+        self._btn_alarm_nav.setToolTip("Тест аварии")
+        self._btn_alarm_nav.setStyleSheet(
+            "QPushButton { background: #c0392b; color: white; font-weight: bold;"
+            " border-radius: 4px; padding: 0 12px; }"
+            "QPushButton:hover { background: #e74c3c; }"
+        )
+        nav_layout.addSpacing(8)
+        nav_layout.addWidget(self._btn_alarm_nav)
+        nav_layout.addSpacing(8)
+
         self._btn_theme = QPushButton("🌙")
         self._btn_theme.setFixedSize(36, 36)
         self._btn_theme.setToolTip("Переключить тему")
@@ -143,6 +156,28 @@ class MainWindow(QMainWindow):
 
         page1.alarm_test.connect(self._start_alarm_blink)
         page1.alarm_reset.connect(self._stop_alarm_blink)
+        self._btn_alarm_nav.clicked.connect(page1.alarm_test)
+
+        from gui.windows.experiment_window.section1 import _CameraWidget
+        cam_settings = self.settings_widget.cameras_widget
+
+        def _refresh_cam_names():
+            for cam in page1.findChildren(_CameraWidget):
+                cam._lbl_cam_name.setText(cam._get_cam_name())
+                cam._lbl_cam_name.adjustSize()
+
+        cam_settings.settings_saved.connect(_refresh_cam_names)
+        self._known_devices: list = []
+
+        def _on_cam_found(found: list):
+            if found != self._known_devices:
+                self._known_devices = found
+                cam_settings.update_devices(found)
+
+        for i, cam in enumerate(page1.findChildren(_CameraWidget)):
+            cam.recording_changed.connect(cam_settings.set_recording)
+            cam.cameras_found.connect(_on_cam_found)
+            cam.capabilities_found.connect(lambda res, fps, idx=i: cam_settings.set_capabilities(idx, res, fps))
 
     def _start_alarm_blink(self):
         if hasattr(self, "_blink_timer") and self._blink_timer.isActive():

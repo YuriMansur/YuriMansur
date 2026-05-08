@@ -130,6 +130,9 @@ class PdfReaderWidget(QWidget):
         tb_lay.setContentsMargins(6, 4, 6, 4)
         tb_lay.setSpacing(6)
 
+
+        
+
         self.cb_docs = QComboBox()
         self.cb_docs.setFixedWidth(220)
         self._refresh_docs()
@@ -325,3 +328,5 @@ class PdfReaderWidget(QWidget):
         page_idx, _ = self._search_results[self._search_idx]
         if page_idx < len(self._pages):
             self.scroll.ensureWidgetVisible(self._pages[page_idx])
+
+    

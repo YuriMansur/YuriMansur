@@ -3,7 +3,6 @@ import datetime, os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QScrollArea, QPushButton, QSlider,
-    QComboBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap
@@ -17,9 +16,13 @@ except ImportError:
 
 import threading as _threading
 
+
+
+
+
 class _FrameWorker(QThread):
-    """Захватывает кадры в фоне, шлёт сигнал в GUI-поток."""
-    frame_ready = pyqtSignal(object)  # numpy array
+    frame_ready = pyqtSignal('PyQt_PyObject')
+    fps_updated = pyqtSignal(int)
 
     def __init__(self, cap):
         super().__init__()
@@ -30,22 +33,28 @@ class _FrameWorker(QThread):
         self._stop = True
 
     def run(self):
+        import time
+        last_frame = 0.0
+        fps_count  = 0
+        fps_ts     = time.monotonic()
+
         while not self._stop:
-            self._cap.grab()          # сбрасываем буфер без декодирования
+            self._cap.grab()
             ok, frame = self._cap.retrieve()
             if ok and frame is not None:
                 self.frame_ready.emit(frame)
-            self.msleep(16)           # ~60 fps max
+                fps_count += 1
 
-class _CamComboBox(QComboBox):
-    def showPopup(self):
-        from PyQt6.QtCore import QPoint
-        super().showPopup()
-        view = self.view()
-        if view and view.window():
-            w = view.window()
-            pos = self.mapToGlobal(QPoint(0, self.height()))
-            w.move(pos)
+            now = time.monotonic()
+            if now - fps_ts >= 1.0:
+                self.fps_updated.emit(fps_count)
+                fps_count = 0
+                fps_ts    = now
+
+            sleep = max(0, 0.033 - (now - last_frame))
+            last_frame = now
+            if sleep:
+                self.msleep(int(sleep * 1000))
 
 class _CamScanner(QThread):
     done = pyqtSignal(list)
@@ -64,9 +73,70 @@ class _CamScanner(QThread):
         self.done.emit(list(enumerate(names)))
 
 
+class _SilentProber(QThread):
+    """Запрашивает возможности камеры через DirectShow без захвата кадров."""
+    done  = pyqtSignal(int, list, list)  # cam_idx, resolutions, fps_list
+    _lock = _threading.Lock()
+
+    def __init__(self, cam_idx: int, device_idx: int):
+        super().__init__()
+        self._cam_idx    = cam_idx
+        self._device_idx = device_idx
+
+    def run(self):
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            self._run_probe()
+        finally:
+            self._lock.release()
+
+    def _run_probe(self):
+        try:
+            from pygrabber.dshow_graph import FilterGraph
+            graph = FilterGraph()
+            graph.add_video_input_device(self._device_idx)
+            formats = graph.get_input_device().get_formats()
+
+            seen_res, seen_fps = set(), set()
+            supported_res, supported_fps = [], []
+
+            for fmt in formats:
+                w, h = fmt.get('width', 0), fmt.get('height', 0)
+                fps  = fmt.get('fps', 0)
+                if w and h:
+                    key = (w, h)
+                    if key not in seen_res:
+                        seen_res.add(key)
+                        supported_res.append(f"{w}x{h}")
+                if fps:
+                    f = round(fps)
+                    if f not in seen_fps:
+                        seen_fps.add(f)
+                        supported_fps.append(f)
+
+            supported_res.sort(key=lambda s: int(s.split('x')[0]))
+            supported_fps.sort()
+
+        except Exception:
+            supported_res, supported_fps = [], []
+
+        if not supported_res:
+            supported_res = ["1280x720"]
+        if not supported_fps:
+            supported_fps = [30]
+
+        self.done.emit(self._cam_idx, supported_res, supported_fps)
+
+
 class _CameraWidget(QWidget):
-    def __init__(self, parent=None):
+    recording_changed  = pyqtSignal(bool)        # True — запись началась, False — остановлена
+    cameras_found      = pyqtSignal(list)         # список (idx, name)
+    capabilities_found = pyqtSignal(list, list)   # supported_resolutions, supported_fps
+
+    def __init__(self, cam_idx: int = 0, parent=None):
         super().__init__(parent)
+        self._cam_idx   = cam_idx
         self._cap       = None
         self._writer    = None
         self._recording = False
@@ -79,6 +149,7 @@ class _CameraWidget(QWidget):
         self._preview.setParent(self)
         self._preview.setGeometry(self.rect())
         self._preview.setMouseTracking(True)
+
 
         # индикатор записи (левый верхний угол)
         self._rec_indicator = QLabel("⏺ REC", self)
@@ -100,13 +171,10 @@ class _CameraWidget(QWidget):
         self._overlay = QWidget(self)
         self._overlay.hide()
 
-        self._cb_cam   = _CamComboBox()
-        self._cb_cam.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self._btn_open    = QPushButton("▶")
-        self._btn_rec     = QPushButton("⏺")
-        self._btn_stop    = QPushButton("⏹")
-        self._btn_refresh = None
-        self._lbl_status  = QLabel("Камера закрыта")
+        self._btn_open = QPushButton("▶")
+        self._btn_rec  = QPushButton("⏺")
+        self._btn_stop = QPushButton("⏹")
+        self._lbl_status = QLabel("Камера закрыта")
         self._btn_rec.setEnabled(False)
         self._btn_stop.setEnabled(False)
         for btn in (self._btn_open, self._btn_rec, self._btn_stop):
@@ -115,11 +183,19 @@ class _CameraWidget(QWidget):
         ov_lay = QHBoxLayout(self._overlay)
         ov_lay.setContentsMargins(6, 4, 6, 4)
         ov_lay.setSpacing(4)
-        ov_lay.addWidget(self._cb_cam)
         ov_lay.addWidget(self._btn_open)
         ov_lay.addWidget(self._btn_rec)
         ov_lay.addWidget(self._btn_stop)
         self._overlay.adjustSize()
+
+        # имя камеры — отдельный виджет внизу слева
+        self._lbl_cam_name = QLabel(self._get_cam_name(), self)
+        self._lbl_cam_name.setStyleSheet(
+            "QLabel { color: white; font-size: 11px; font-weight: bold;"
+            " background: rgba(0,0,0,150); border-radius: 3px; padding: 2px 7px; }"
+        )
+        self._lbl_cam_name.adjustSize()
+        self._lbl_cam_name.hide()
 
         self._hover_timer = QTimer(self)
         self._hover_timer.setInterval(100)
@@ -136,6 +212,18 @@ class _CameraWidget(QWidget):
         self._scan_timer.start()
         self._do_scan()
 
+    def _get_cam_name(self) -> str:
+        import json
+        key = "cam1" if self._cam_idx == 0 else "cam2"
+        try:
+            cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "..", "..", "camera_settings.json")
+            with open(os.path.normpath(cfg_path), "r", encoding="utf-8") as f:
+                name = json.load(f).get(key, {}).get("device_name", "")
+            return name or f"Камера {self._cam_idx + 1}"
+        except Exception:
+            return f"Камера {self._cam_idx + 1}"
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._preview.setGeometry(self.rect())
@@ -144,16 +232,21 @@ class _CameraWidget(QWidget):
         self._overlay.move(self.width() - self._overlay.width() - margin, margin)
         self._rec_indicator.adjustSize()
         self._rec_indicator.move(margin, margin)
+        self._lbl_cam_name.adjustSize()
+        self._lbl_cam_name.move(margin, self.height() - self._lbl_cam_name.height() - margin)
 
     def _update_overlay(self):
         from PyQt6.QtGui import QCursor
         pos = self.mapFromGlobal(QCursor.pos())
-        hovered = self.rect().contains(pos) or self._cb_cam.view().isVisible()
+        hovered = self.rect().contains(pos)
         if hovered and not self._overlay.isVisible():
             self._overlay.show()
             self._overlay.raise_()
+            self._lbl_cam_name.show()
+            self._lbl_cam_name.raise_()
         elif not hovered and self._overlay.isVisible():
             self._overlay.hide()
+            self._lbl_cam_name.hide()
 
     def _do_scan(self):
         self._scanner = _CamScanner()
@@ -161,36 +254,47 @@ class _CameraWidget(QWidget):
         self._scanner.start()
 
     def _on_cameras_found(self, found: list):
+        self.cameras_found.emit(found)
+        self._btn_open.setEnabled(bool(found))
+        # обновляем название если камера не открыта
+        if not (self._cap and self._cap.isOpened()):
+            self._lbl_cam_name.setText(self._get_cam_name())
+            self._lbl_cam_name.adjustSize()
+            margin = 8
+            self._lbl_cam_name.move(margin, self.height() - self._lbl_cam_name.height() - margin)
 
-        # обновляем комбобокс только если список изменился
-        current_labels = [self._cb_cam.itemText(i) for i in range(self._cb_cam.count())]
-        new_labels = [label for _, label in found]
-        if current_labels == new_labels:
+        if not found or (self._cap and self._cap.isOpened()):
+            return
+        if getattr(self, '_silent_prober', None) and self._silent_prober.isRunning():
             return
 
-        prev = self._cb_cam.currentData()
-        self._cb_cam.blockSignals(True)
-        self._cb_cam.clear()
-        if not found:
-            self._cb_cam.addItem("Нет устройств")
-        else:
-            for idx, label in found:
-                self._cb_cam.addItem(label, idx)
-            for i in range(self._cb_cam.count()):
-                if self._cb_cam.itemData(i) == prev:
-                    self._cb_cam.setCurrentIndex(i)
-                    break
-        self._cb_cam.blockSignals(False)
-        self._cb_cam.setEnabled(True)
-        self._btn_open.setEnabled(bool(found))
-        # зафиксировать ширину по самому длинному пункту
-        fm = self._cb_cam.fontMetrics()
-        max_w = max((fm.horizontalAdvance(self._cb_cam.itemText(i))
-                     for i in range(self._cb_cam.count())), default=100)
-        self._cb_cam.setMinimumWidth(max_w + 52)  # +52 на стрелку, отступы и запас
-        self._overlay.adjustSize()
-        margin = 8
-        self._overlay.move(self.width() - self._overlay.width() - margin, margin)
+        from gui.windows.settings_window.tab_wigets.ui_cameras_settings import load_camera_settings
+        cfg = load_camera_settings()
+
+        # device_ids уже сохранённых в конфиге камер
+        configured_ids = {
+            c.get("device_id")
+            for c in (cfg.get("cam1", {}), cfg.get("cam2", {}))
+            if c.get("device_id") is not None
+        }
+
+        # для текущего виджета — если есть конфиг с resolution+fps, отдаём сразу
+        key = "cam1" if self._cam_idx == 0 else "cam2"
+        saved = cfg.get(key, {})
+        if saved.get("resolution") and saved.get("fps"):
+            self.capabilities_found.emit([saved["resolution"]], [saved["fps"]])
+            return
+
+        # ищем первую камеру из найденных, которой ещё нет в конфиге
+        to_probe = [idx for idx, _ in found if idx not in configured_ids]
+        if not to_probe:
+            return
+
+        self._silent_prober = _SilentProber(0, to_probe[0])
+        self._silent_prober.done.connect(
+            lambda _, res, fps: self.capabilities_found.emit(res, fps)
+        )
+        self._silent_prober.start()
 
     def _open_camera(self):
         if _cv2 is None:
@@ -199,24 +303,52 @@ class _CameraWidget(QWidget):
         if self._cap and self._cap.isOpened():
             self._close_camera()
             return
-        idx = self._cb_cam.currentData()
+        from gui.windows.settings_window.tab_wigets.ui_cameras_settings import load_camera_settings
+        s = load_camera_settings()
+        key = "cam1" if self._cam_idx == 0 else "cam2"
+        idx = s.get(key, {}).get("device_id")
         if idx is None:
+            self._lbl_status.setText("Камера не выбрана в настройках")
             return
+
+        self._lbl_cam_name.setText(self._get_cam_name())
+        self._overlay.adjustSize()
+
         self._cap = _cv2.VideoCapture(idx, _cv2.CAP_DSHOW)
-        self._cap.set(_cv2.CAP_PROP_FRAME_WIDTH, 9999)
+        self._cap.set(_cv2.CAP_PROP_FRAME_WIDTH,  9999)
         self._cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, 9999)
         self._cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
         if self._cap.isOpened():
-            self._worker = _FrameWorker(self._cap)
-            self._worker.frame_ready.connect(self._on_frame)
-            self._worker.start()
-            self._btn_rec.setEnabled(True)
-            self._btn_stop.setEnabled(True)
             self._btn_open.setText("⏹")
             self._lbl_status.setText("Камера открыта")
+            self._start_worker()
         else:
             self._cap = None
             self._lbl_status.setText(f"Камера {idx} недоступна")
+
+
+
+    def _on_capabilities(self, resolutions: list, fps_list: list):
+        self.capabilities_found.emit(resolutions, fps_list)
+
+    def _start_worker(self):
+        if self._cap and self._cap.isOpened():
+            w = int(self._cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(self._cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+            name = self._get_cam_name()
+            self._cam_info = f"{name}  {w}×{h}"
+            self._lbl_cam_name.setText(self._cam_info)
+            self._lbl_cam_name.adjustSize()
+            margin = 8
+            self._lbl_cam_name.move(margin, self.height() - self._lbl_cam_name.height() - margin)
+
+            self._worker = _FrameWorker(self._cap)
+            self._worker.frame_ready.connect(self._on_frame)
+            self._worker.fps_updated.connect(self._on_fps)
+            self._worker.start()
+            self._btn_rec.setEnabled(True)
+            self._btn_stop.setEnabled(True)
+            self._lbl_status.setText("Камера открыта")
 
     def _start_record(self):
         if not self._cap or not self._cap.isOpened():
@@ -228,6 +360,7 @@ class _CameraWidget(QWidget):
         fourcc = _cv2.VideoWriter_fourcc(*"XVID")
         self._writer = _cv2.VideoWriter(path, fourcc, 25.0, (w, h))
         self._recording = True
+        self.recording_changed.emit(True)
         self._btn_rec.setEnabled(False)
         self._lbl_status.setText(f"● Запись → {os.path.basename(path)}")
         self._rec_indicator.show()
@@ -236,6 +369,7 @@ class _CameraWidget(QWidget):
 
     def _stop(self):
         self._recording = False
+        self.recording_changed.emit(False)
         self._rec_blink.stop()
         self._rec_indicator.hide()
         if self._writer:
@@ -260,6 +394,14 @@ class _CameraWidget(QWidget):
         self._btn_rec.setEnabled(False)
         self._btn_stop.setEnabled(False)
         self._lbl_status.setText("Камера закрыта")
+        self._lbl_cam_name.setText(self._get_cam_name())
+        self._lbl_cam_name.adjustSize()
+
+    def _on_fps(self, fps: int):
+        self._lbl_cam_name.setText(
+            f"{self._cam_info}  {fps}fps"
+        )
+        self._lbl_cam_name.adjustSize()
 
     def _on_frame(self, frame):
         if self._recording and self._writer:
@@ -313,6 +455,7 @@ def _make_section1() -> QWidget:
     btn_alarm_test.clicked.connect(_emit_alarm)
 
     ctrl_title = QLabel("Управление")
+    ctrl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #1abc9c;")
     lay.addWidget(ctrl_title)
 
     btn_power = QPushButton("Вкл. привод")
@@ -331,7 +474,7 @@ def _make_section1() -> QWidget:
     motion_row = QHBoxLayout()
     motion_row.setSpacing(8)
 
-    arrows_col = QVBoxLayout()
+    arrows_col = QHBoxLayout()
     arrows_col.setSpacing(4)
     arrows_col.addWidget(btn_up)
     arrows_col.addWidget(btn_down)
@@ -369,7 +512,6 @@ def _make_section1() -> QWidget:
     right_col.addLayout(toggle_row)
     alarm_row = QHBoxLayout()
     alarm_row.setSpacing(4)
-    alarm_row.addWidget(btn_alarm_test)
     alarm_row.addWidget(btn_reset)
     right_col.addLayout(alarm_row)
 
@@ -404,14 +546,14 @@ def _make_section1() -> QWidget:
     lay.addWidget(sep_cam)
 
     from PyQt6.QtWidgets import QSizePolicy
-    cam1 = _CameraWidget()
+    cam1 = _CameraWidget(cam_idx=0)
     cam1.setMinimumHeight(180)
     cam1.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
     lay.addWidget(cam1, 1)
 
-    cam2 = _CameraWidget()
+    cam2 = _CameraWidget(cam_idx=1)
     cam2.setMinimumHeight(180)
     cam2.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
     lay.addWidget(cam2, 1)
     scroll.setWidget(container)
-    return scroll
+    return scroll, btn_alarm_test

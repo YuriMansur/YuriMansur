@@ -25,6 +25,12 @@ class ExperimentWidget(QWidget):
         sec2.params_changed.connect(sec3.set_params)
         sec3.set_params(sec2.cb_std.currentText(), sec2.cb_method.currentText())
 
+        def _on_started(running: bool):
+            for w in (sec2.cb_std, sec2.cb_load, sec2.cb_cond, sec2.cb_method):
+                w.setEnabled(not running)
+
+        sec3.started.connect(_on_started)
+
         self._col_frames = []
         for i in range(1, 5):
             frame = QFrame()
@@ -36,7 +42,8 @@ class ExperimentWidget(QWidget):
             col_layout.setSpacing(4)
 
             if i == 1:
-                col_layout.addWidget(_make_section1(), 1)
+                sec1, self._btn_alarm_test = _make_section1()
+                col_layout.addWidget(sec1, 1)
             elif i == 2:
                 col_layout.addWidget(sec2, 1)
             elif i == 3:
@@ -44,10 +51,12 @@ class ExperimentWidget(QWidget):
             elif i == 4:
                 self._sec4_plots = make_section4(col_layout)
 
-            stretch = {1: 5, 2: 5, 3: 4, 4: 5}.get(i, 1)
+            stretch = {1: 5, 2: 4, 3: 5, 4: 5}.get(i, 1)
             columns_layout.addWidget(frame, stretch)
 
         main_layout.addLayout(columns_layout, 1)
+        self.alarm_test.connect(sec3.on_alarm)
+
 
     def set_theme(self, dark: bool):
         import pyqtgraph as pg
@@ -86,10 +95,24 @@ class ExperimentWidget(QWidget):
                     "background: #3a3a3a; color: #888888; font-size: 13px;"
                     " border: 1px solid #555555; border-radius: 4px;"
                 )
+                cam._overlay.setStyleSheet(
+                    "background: rgba(30,30,30,180); border-radius: 4px;"
+                )
+                cam._lbl_cam_name.setStyleSheet(
+                    "QLabel { color: white; font-size: 11px; font-weight: bold;"
+                    " background: rgba(0,0,0,150); border-radius: 3px; padding: 2px 7px; }"
+                )
             else:
                 cam._preview.setStyleSheet(
                     "background: #d8d8d8; color: #888888; font-size: 13px;"
                     " border: 1px solid #b0b0b0; border-radius: 4px;"
+                )
+                cam._overlay.setStyleSheet(
+                    "background: rgba(220,220,220,200); border-radius: 4px;"
+                )
+                cam._lbl_cam_name.setStyleSheet(
+                    "QLabel { color: #1a1a1a; font-size: 11px; font-weight: bold;"
+                    " background: rgba(200,200,200,180); border-radius: 3px; padding: 2px 7px; }"
                 )
 
         # графики секции 4
