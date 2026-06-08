@@ -1,2 +1,12 @@
 # Claude Code
 .claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller
+*.spec
+build/
+dist/

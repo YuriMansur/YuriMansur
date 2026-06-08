@@ -39,65 +39,105 @@ _CH_NAMES = [
     "Датчик перемещения",
 ]
 
-# ── стиль панели каналов (тёмная тема, совпадает с навбаром) ─────────────────
-_PANEL_STYLE = """
-    QFrame#chPanel {
-        background-color: #2c3e50;
+def _panel_style(dark: bool) -> str:
+    if dark:
+        bg, text, ctrl_bg, border = "#2c3e50", "#ecf0f1", "#3d5166", "#4a6278"
+    else:
+        bg, text, ctrl_bg, border = "#dde3ea", "#1a1a1a", "#c5cdd6", "#a0aab4"
+    return f"""
+    QFrame#chPanel {{
+        background-color: {bg};
         border-bottom: 2px solid #3498db;
-    }
-    QWidget {
-        background-color: #2c3e50;
-    }
-    QLabel {
-        color: #ecf0f1;
+    }}
+    QWidget {{
+        background-color: {bg};
+    }}
+    QLabel {{
+        color: {text};
         background: transparent;
-    }
-    QSpinBox {
-        background: #3d5166;
-        color: #ecf0f1;
-        border: 1px solid #4a6278;
+    }}
+    QSpinBox {{
+        background: {ctrl_bg};
+        color: {text};
+        border: 1px solid {border};
         border-radius: 3px;
         padding: 1px 4px;
         min-height: 20px;
-    }
-    QSpinBox::up-button, QSpinBox::down-button {
-        background: #4a6278;
+    }}
+    QSpinBox::up-button, QSpinBox::down-button {{
+        background: {border};
         border: none;
         width: 14px;
-    }
-    QCheckBox {
-        color: #ecf0f1;
+    }}
+    QCheckBox {{
+        color: {text};
         background: transparent;
         spacing: 5px;
-    }
-    QCheckBox::indicator {
+    }}
+    QCheckBox::indicator {{
         width: 14px;
         height: 14px;
-        border: 1px solid #7f8c8d;
+        border: 1px solid {border};
         border-radius: 2px;
-        background: #3d5166;
-    }
-    QCheckBox::indicator:checked {
+        background: {ctrl_bg};
+    }}
+    QCheckBox::indicator:checked {{
         background: #3498db;
         border-color: #2980b9;
-    }
-    QSlider::groove:horizontal {
-        background: #4a6278;
+    }}
+    QSlider::groove:horizontal {{
+        background: {border};
         height: 4px;
         border-radius: 2px;
-    }
-    QSlider::handle:horizontal {
+    }}
+    QSlider::handle:horizontal {{
         background: #3498db;
         width: 12px;
         height: 12px;
         margin: -4px 0;
         border-radius: 6px;
         border: none;
-    }
-    QSlider::handle:horizontal:hover {
+    }}
+    QSlider::handle:horizontal:hover {{
         background: #5dade2;
-    }
+    }}
 """
+
+
+def _nav_style(dark: bool) -> str:
+    bg = "#2c3e50" if dark else "#dde3ea"
+    return f"QFrame {{ background-color: {bg}; border-bottom: 2px solid #3498db; }}"
+
+
+def _btn_mode_style(dark: bool) -> str:
+    text    = "#ecf0f1" if dark else "#1a1a1a"
+    btn_bg  = "#3d5166" if dark else "#c5cdd6"
+    btn_brd = "#4a6278" if dark else "#a0aab4"
+    btn_hov = "#4a6a82" if dark else "#b0bcc8"
+    return f"""
+        QPushButton {{
+            color: {text};
+            background-color: {btn_bg};
+            border: 1px solid {btn_brd};
+            border-radius: 4px;
+            padding: 4px 16px;
+            font-size: 13px;
+            min-width: 80px;
+        }}
+        QPushButton:checked {{
+            background-color: #3498db;
+            border: 1px solid #2980b9;
+            color: white;
+            font-weight: bold;
+        }}
+        QPushButton:hover:!checked {{
+            background-color: {btn_hov};
+        }}
+    """
+
+
+# оставляем для совместимости с местами, где используется напрямую
+_PANEL_STYLE = _panel_style(True)
 
 
 class TrendsWiget(QWidget):
@@ -132,44 +172,20 @@ class TrendsWiget(QWidget):
         root.setSpacing(4)
 
         # ── переключатель режимов ────────────────────────────────────────────
-        nav_frame = QFrame()
-        nav_frame.setStyleSheet("""
-            QFrame {
-                background-color: #2c3e50;
-                border-bottom: 2px solid #3498db;
-            }
-        """)
+        self._nav_frame = QFrame()
+        self._nav_frame.setStyleSheet(_nav_style(True))
+        nav_frame = self._nav_frame
         row_mode = QHBoxLayout(nav_frame)
         row_mode.setContentsMargins(6, 4, 6, 4)
         row_mode.setSpacing(6)
 
-        btn_style = """
-            QPushButton {{
-                color: #ecf0f1;
-                background-color: #3d5166;
-                border: 1px solid #4a6278;
-                border-radius: 4px;
-                padding: 4px 16px;
-                font-size: 13px;
-                min-width: 80px;
-            }}
-            QPushButton:checked {{
-                background-color: #3498db;
-                border: 1px solid #2980b9;
-                color: white;
-                font-weight: bold;
-            }}
-            QPushButton:hover:!checked {{
-                background-color: #4a6a82;
-            }}
-        """
         self.btn_live    = QPushButton("● Live")
         self.btn_archive = QPushButton("Архив")
         self.btn_live   .setCheckable(True)
         self.btn_archive.setCheckable(True)
         self.btn_live   .setChecked(True)
-        self.btn_live   .setStyleSheet(btn_style)
-        self.btn_archive.setStyleSheet(btn_style)
+        self.btn_live   .setStyleSheet(_btn_mode_style(True))
+        self.btn_archive.setStyleSheet(_btn_mode_style(True))
         self.btn_live   .clicked.connect(lambda: self._set_mode("live"))
         self.btn_archive.clicked.connect(lambda: self._set_mode("archive"))
         row_mode.addWidget(self.btn_live)
@@ -183,9 +199,10 @@ class TrendsWiget(QWidget):
         controls_row.setSpacing(4)
         root.addLayout(controls_row)
 
-        ch_frame = QFrame()
-        ch_frame.setObjectName("chPanel")
-        ch_frame.setStyleSheet(_PANEL_STYLE)
+        self._ch_frame = QFrame()
+        self._ch_frame.setObjectName("chPanel")
+        self._ch_frame.setStyleSheet(_panel_style(True))
+        ch_frame = self._ch_frame
         ch_outer = QVBoxLayout(ch_frame)
         ch_outer.setContentsMargins(4, 2, 4, 2)
         ch_outer.setSpacing(1)
@@ -197,7 +214,7 @@ class TrendsWiget(QWidget):
 
         # ── панель архива ────────────────────────────────────────────────────
         self._arch_panel = QFrame()
-        self._arch_panel.setStyleSheet(_PANEL_STYLE)
+        self._arch_panel.setStyleSheet(_panel_style(True))
         arch_layout = QVBoxLayout(self._arch_panel)
         arch_layout.setContentsMargins(4, 2, 4, 2)
         arch_layout.setSpacing(2)
@@ -279,6 +296,17 @@ class TrendsWiget(QWidget):
         _auto_btn.show = lambda: None  # запретить pyqtgraph показывать кнопку
         self._legend = self.plot_widget.addLegend()
         root.addWidget(self.plot_widget, 1)
+
+        # ── накладная метка: число видимых точек ─────────────────────────────
+        self._pts_label = QLabel("", self.plot_widget.viewport())
+        self._pts_label.setStyleSheet(
+            "background: rgba(0,0,0,160); color: #aaaaaa;"
+            " font-size: 11px; padding: 2px 6px; border-radius: 3px;"
+        )
+        self._pts_label.move(8, 8)
+        self._pts_label.raise_()
+        self._pts_label.show()
+        self._pts_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         # перевод контекстного меню
         self._csv_export_action, self._xlsx_export_action, self._export_menu_action = \
@@ -517,6 +545,28 @@ class TrendsWiget(QWidget):
         ch['curve'].setSymbolBrush(pg.mkBrush(ch['color']) if checked else None)
         vb.setRange(xRange=saved[0], yRange=saved[1], padding=0)
 
+    def _update_pts_label(self):
+        (x0, x1), _ = self.plot_widget.getViewBox().viewRange()
+        lines = []
+        if self._mode == "live":
+            for ch in self._channels.values():
+                if not ch['visible']:
+                    continue
+                xs, _ = ch['curve'].getData()
+                if xs is None or len(xs) == 0:
+                    continue
+                n = int(np.searchsorted(xs, x1, 'right') - np.searchsorted(xs, x0, 'left'))
+                lines.append(f"{ch['name'][:22]}: {n}")
+        else:
+            for ch_id, line in self._archive_lines.items():
+                xs, _ = line.getData()
+                if xs is None or len(xs) == 0:
+                    continue
+                n = int(np.searchsorted(xs, x1, 'right') - np.searchsorted(xs, x0, 'left'))
+                lines.append(f"{self._channels[ch_id]['name'][:22]}: {n}")
+        self._pts_label.setText("\n".join(lines) if lines else "")
+        self._pts_label.adjustSize()
+
     # ── режимы ────────────────────────────────────────────────────────────────
 
     def _set_mode(self, mode: str):
@@ -676,6 +726,7 @@ class TrendsWiget(QWidget):
             if n > 0:
                 all_y.append(ch['buf_v'][:n])
         if not all_y:
+            self._update_pts_label()
             return
         y = np.concatenate(all_y)
         ymin, ymax = float(y.min()), float(y.max())
@@ -686,6 +737,7 @@ class TrendsWiget(QWidget):
         if abs(lo - prev_lo) / prev_span > 0.05 or abs(hi - prev_hi) / prev_span > 0.05:
             self.plot_widget.getViewBox().setYRange(lo, hi, padding=0)
             self._y_range = (lo, hi)
+        self._update_pts_label()
 
     def _on_manual_pan(self):
         """Пользователь потащил график мышью — останавливаем авто-скролл."""
@@ -788,29 +840,33 @@ class TrendsWiget(QWidget):
         self._archive_parts.clear()
         self._workers_done = 0
 
-        total_ms = qdt_from.msecsTo(qdt_to)
-        step_ms  = total_ms // N_ARCHIVE_WORKERS
-
-        # запустить воркеры для каждого видимого канала
+        # видимые каналы для загрузки
         visible_sources = {
             ch_id: src
             for ch_id, src in self._ARCHIVE_SOURCES.items()
             if self._channels.get(ch_id, {}).get('visible', True)
         }
+        if not visible_sources:
+            return
         self._total_archive_workers = len(visible_sources) * N_ARCHIVE_WORKERS
         self._set_load_progress(0)
+
+        total_ms = qdt_from.msecsTo(qdt_to)
+        step_ms  = total_ms // N_ARCHIVE_WORKERS
 
         for ch_id, (measurement, field) in visible_sources.items():
             self._archive_parts[ch_id] = {}
             for i in range(N_ARCHIVE_WORKERS):
                 p_from = qdt_from.addMSecs(i * step_ms)
                 p_to   = qdt_from.addMSecs((i + 1) * step_ms) if i < N_ARCHIVE_WORKERS - 1 else qdt_to
+                # keep — только нужные колонки (меньше байт по HTTP и парсинга);
+                # group()/sort() не нужны: один воркер тянет непрерывный кусок
+                # одной серии, Influx отдаёт его по времени по возрастанию.
                 query  = f'''
 from(bucket: "{INFLUX_BUCKET}")
   |> range(start: {p_from.toString("yyyy-MM-ddTHH:mm:ssZ")}, stop: {p_to.toString("yyyy-MM-ddTHH:mm:ssZ")})
   |> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}")
-  |> group()
-  |> sort(columns: ["_time"])
+  |> keep(columns: ["_time", "_value"])
 '''
                 worker = _ArchiveWorker(i, query, parent=self)
                 worker.part_ready.connect(
@@ -822,23 +878,35 @@ from(bucket: "{INFLUX_BUCKET}")
         for w in self._archive_workers:
             w.start()
 
-    def _on_archive_part(self, ch_id: int, idx: int, times: list, values: list):
+    def _on_archive_part(self, ch_id: int, idx: int, times, values):
+        """Часть канала пришла (times/values — numpy-массивы от воркера)."""
         if ch_id not in self._archive_parts:
             return
         self._archive_parts[ch_id][idx] = (times, values)
+        # ждём ВСЕ части канала, затем строим кривую один раз —
+        # без промежуточных setData (каждый из них пересчитывал даунсэмпл по всем точкам)
+        if len(self._archive_parts[ch_id]) < N_ARCHIVE_WORKERS:
+            return
         parts_t, parts_v = [], []
         for i in range(N_ARCHIVE_WORKERS):
-            if i not in self._archive_parts[ch_id]:
-                break
             t, v = self._archive_parts[ch_id][i]
-            if t:
-                parts_t.append(np.asarray(t, dtype=np.float64))
-                parts_v.append(np.asarray(v, dtype=np.float64))
+            if len(t):
+                parts_t.append(t)
+                parts_v.append(v)
         if not parts_t:
             return
+        # части идут в порядке idx 0…N-1; интервалы воркеров не пересекаются,
+        # а внутри куска сортировка уже сделана в воркере → склейки достаточно,
+        # полный argsort по всему массиву на GUI-потоке не нужен (он и морозил интерфейс)
+        import time as _t                       # DEBUG-тайминг: убрать после диагностики
+        _g0 = _t.perf_counter()
         x = np.concatenate(parts_t)
         y = np.concatenate(parts_v)
+        _g1 = _t.perf_counter()
         self._update_archive_curve(ch_id, x, y)
+        _g2 = _t.perf_counter()
+        print(f"[GUI ch{ch_id}] точек={len(x):>9}  склейка={_g1 - _g0:6.3f}с  "
+              f"setData/отрисовка={_g2 - _g1:6.3f}с")
 
     def _on_archive_worker_done(self):
         self._workers_done += 1
@@ -955,18 +1023,20 @@ from(bucket: "{INFLUX_BUCKET}")
     # ── контекстное меню графика ──────────────────────────────────────────────
 
     def set_theme(self, dark: bool):
-        if dark:
-            self.plot_widget.setBackground("#2c2c2c")
-            self.plot_widget.getAxis("left").setPen(pg.mkPen("#aaaaaa"))
-            self.plot_widget.getAxis("bottom").setPen(pg.mkPen("#aaaaaa"))
-            self.plot_widget.getAxis("left").setTextPen(pg.mkPen("#aaaaaa"))
-            self.plot_widget.getAxis("bottom").setTextPen(pg.mkPen("#aaaaaa"))
-        else:
-            self.plot_widget.setBackground("#f5f5f5")
-            self.plot_widget.getAxis("left").setPen(pg.mkPen("#333333"))
-            self.plot_widget.getAxis("bottom").setPen(pg.mkPen("#333333"))
-            self.plot_widget.getAxis("left").setTextPen(pg.mkPen("#333333"))
-            self.plot_widget.getAxis("bottom").setTextPen(pg.mkPen("#333333"))
+        axis_color = "#aaaaaa" if dark else "#333333"
+        plot_bg    = "#2c2c2c" if dark else "#f5f5f5"
+        self.plot_widget.setBackground(plot_bg)
+        for axis in ("left", "bottom"):
+            self.plot_widget.getAxis(axis).setPen(pg.mkPen(axis_color))
+            self.plot_widget.getAxis(axis).setTextPen(pg.mkPen(axis_color))
+
+        panel_ss = _panel_style(dark)
+        self._nav_frame.setStyleSheet(_nav_style(dark))
+        self._ch_frame.setStyleSheet(panel_ss)
+        self._arch_panel.setStyleSheet(panel_ss)
+        btn_ss = _btn_mode_style(dark)
+        self.btn_live.setStyleSheet(btn_ss)
+        self.btn_archive.setStyleSheet(btn_ss)
 
     def _build_graph_context_menu(self):
         menu = self.plot_widget.getViewBox().menu
@@ -1155,7 +1225,8 @@ from(bucket: "{INFLUX_BUCKET}")
         # прямой запрос к InfluxDB для каждого выбранного канала
         ch_data: list[tuple[str, np.ndarray, np.ndarray]] = []
         try:
-            client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+            client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG,
+                                    enable_gzip=True)
             for ch_id in selected:
                 measurement, field = self._ARCHIVE_SOURCES[ch_id]
                 query = f'''

@@ -140,6 +140,7 @@ class _CameraWidget(QWidget):
         self._cap       = None
         self._writer    = None
         self._recording = False
+        self._found: list = []   # последний результат скана: [(device_idx, name), ...]
         self._worker: _FrameWorker | None = None
         self.setMouseTracking(True)
 
@@ -215,14 +216,34 @@ class _CameraWidget(QWidget):
     def _get_cam_name(self) -> str:
         import json
         key = "cam1" if self._cam_idx == 0 else "cam2"
+        dev_id, fallback = None, ""
         try:
             cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "..", "..", "..", "camera_settings.json")
             with open(os.path.normpath(cfg_path), "r", encoding="utf-8") as f:
-                name = json.load(f).get(key, {}).get("device_name", "")
-            return name or f"Камера {self._cam_idx + 1}"
+                slot = json.load(f).get(key, {})
+            dev_id   = slot.get("device_id")
+            fallback = slot.get("device_name", "")
         except Exception:
-            return f"Камера {self._cam_idx + 1}"
+            pass
+
+        # Предпочитаем живое имя из последнего скана по device_id, а не
+        # сохранённую (возможно устаревшую) строку. Одинаковые камеры
+        # различаем по порядковому номеру среди тёзок.
+        if dev_id is not None:
+            same_name = [n for i, n in self._found if i == dev_id]
+            if same_name:
+                name  = same_name[0]
+                dupes = [i for i, n in self._found if n == name]
+                if len(dupes) > 1:
+                    name = f"{name} #{dupes.index(dev_id) + 1}"
+                return name
+            # скан уже прошёл, а настроенного устройства нет — не показываем
+            # устаревшее имя из конфига
+            if self._found:
+                return f"Камера {self._cam_idx + 1}"
+
+        return fallback or f"Камера {self._cam_idx + 1}"
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -254,6 +275,7 @@ class _CameraWidget(QWidget):
         self._scanner.start()
 
     def _on_cameras_found(self, found: list):
+        self._found = found
         self.cameras_found.emit(found)
         self._btn_open.setEnabled(bool(found))
         # обновляем название если камера не открыта

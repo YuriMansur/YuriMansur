@@ -284,17 +284,40 @@ class CameraSettingsWidget(QWidget):
         return grp, cb_dev, lbl_res, lbl_fps
 
     def _fill_dev_combo(self, cb: QComboBox, saved_id=None):
-        """Заполняет дропдаун только физически доступными устройствами из конфига."""
+        """Заполняет дропдаун физически подключёнными сейчас устройствами.
+
+        Имена берутся из живого скана (self._found), а не из сохранённого
+        конфига — иначе показывались бы устаревшие названия (напр. «Logi»,
+        которой уже нет). Конфиг devices используется только как запасной
+        источник, пока скан ещё не прошёл.
+        """
         cb.blockSignals(True)
         cb.clear()
         cb.addItem("Не назначена", userData=None)
-        cfg = load_camera_settings()
-        for dev_id_str, dev_cfg in cfg.get("devices", {}).items():
-            dev_id = int(dev_id_str)
-            # фильтруем только если уже есть результаты сканирования
-            if self._available_ids and dev_id not in self._available_ids:
-                continue
-            cb.addItem(dev_cfg.get("name", f"Устройство {dev_id_str}"), userData=dev_id)
+
+        if self._found:
+            source = [(idx, name) for idx, name in self._found]
+        else:
+            cfg = load_camera_settings()
+            source = [
+                (int(k), v.get("name", f"Устройство {k}"))
+                for k, v in cfg.get("devices", {}).items()
+            ]
+
+        # сколько устройств с каждым именем — для различения одинаковых камер
+        name_counts: dict[str, int] = {}
+        for _, name in source:
+            name_counts[name] = name_counts.get(name, 0) + 1
+
+        seen_name: dict[str, int] = {}
+        for dev_id, name in source:
+            # одинаковые камеры различаем по порядковому номеру
+            if name_counts.get(name, 0) > 1:
+                seen_name[name] = seen_name.get(name, 0) + 1
+                label = f"{name} #{seen_name[name]}"
+            else:
+                label = name
+            cb.addItem(label, userData=dev_id)
         if saved_id is not None:
             for i in range(cb.count()):
                 if cb.itemData(i) == saved_id:

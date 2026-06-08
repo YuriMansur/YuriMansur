@@ -22,6 +22,7 @@ class ExperimentWidget(QWidget):
 
         sec2 = Section2Widget()
         sec3 = Section3Widget()
+        self._sec3 = sec3
         sec2.params_changed.connect(sec3.set_params)
         sec3.set_params(sec2.cb_std.currentText(), sec2.cb_method.currentText())
 
@@ -51,7 +52,7 @@ class ExperimentWidget(QWidget):
             elif i == 4:
                 self._sec4_plots = make_section4(col_layout)
 
-            stretch = {1: 5, 2: 4, 3: 5, 4: 5}.get(i, 1)
+            stretch = {1: 5, 2: 3, 3: 6, 4: 5}.get(i, 1)
             columns_layout.addWidget(frame, stretch)
 
         main_layout.addLayout(columns_layout, 1)
@@ -62,6 +63,10 @@ class ExperimentWidget(QWidget):
         import pyqtgraph as pg
         from PyQt6.QtWidgets import QFrame
         from gui.windows.experiment_window.section1 import _CameraWidget
+
+        # секция 3 (мастер испытания) перестраивается под новую палитру
+        if hasattr(self, "_sec3"):
+            self._sec3.set_theme(dark)
 
         from PyQt6.QtGui import QPalette, QColor
         from PyQt6.QtWidgets import QComboBox, QDateTimeEdit

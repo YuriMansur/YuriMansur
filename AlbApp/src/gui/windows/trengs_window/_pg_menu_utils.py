@@ -15,11 +15,11 @@ def _translate_pg_menus(plot_widget):
 
     # Режим мыши: 3 кнопки (панорама) по умолчанию, убрать из меню
     vb.setMouseMode(pg.ViewBox.PanMode)
-
+                                  
     # ── ViewBox: подменю осей → перенести в "Масштаб" ────────
     _sub_ru = {"X axis": "Ось X", "Y axis": "Ось Y"}
     axis_actions = []
-    for action in m.actions():
+    for action in m.actions():                                  
         if action.menu():
             if action.text() in _sub_ru:
                 ru_title = _sub_ru[action.text()]
