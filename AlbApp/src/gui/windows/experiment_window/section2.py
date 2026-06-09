@@ -6,7 +6,7 @@ from PyQt6.QtCore import Qt, QDateTime, pyqtSignal
 
 from gui.windows.settings_window.F_parameters import GOST_OPTIONS
 
-_ISO_10328_METHODS = ["16.3","17.4.5"]
+_ISO_10328_METHODS = ["6.4.4","16.3","17.4.5"]
 
 METHOD_OPTIONS = {
     "Р53868-2021":       _ISO_10328_METHODS,

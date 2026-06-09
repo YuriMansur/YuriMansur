@@ -172,6 +172,7 @@ _DEFAULT_PROCEDURE = [
 _METHODIC_FILES = {
     "17.4.5": "17_4_5.json",
     "16.3":   "16_3.json",
+    "6.4.4":  "6_4_4.json",
 }
 
 
