@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-    QScrollArea, QPushButton, QLineEdit, QMessageBox,
+    QScrollArea, QPushButton, QLineEdit, QDialog,
 )
 from PyQt6.QtCore import pyqtSignal, QTimer, Qt, QPoint
 from PyQt6.QtGui import QPainter, QColor, QPolygon
@@ -164,6 +164,32 @@ PROCEDURES: dict[tuple, list[dict]] = {
 _DEFAULT_PROCEDURE = [
     {"type": "info", "text": "Для данного сочетания ГОСТ / Методика процедура не задана."},
 ]
+
+
+# ── Описания методик (JSON) ──────────────────────────────────────────────────
+# Структура шагов и вложенных под-шагов выносится в methodics/<файл>.json.
+# Поведение (рендеры, ветвления) остаётся в коде и привязывается по полю "kind".
+_METHODIC_FILES = {
+    "17.4.5": "17_4_5.json",
+    "16.3":   "16_3.json",
+}
+
+
+def _load_methodic(gost: str, method: str) -> dict | None:
+    """Загрузить описание методики из methodics/<файл>.json (или None, если нет)."""
+    import json
+    from pathlib import Path
+    fname = _METHODIC_FILES.get(method)
+    if not fname:
+        return None
+    path = Path(__file__).parent / "methodics" / fname
+    if not path.exists():
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 # ── Пошаговый мастер испытания ───────────────────────────────────────────────
@@ -434,48 +460,11 @@ class _CyclicWizard(QWidget):
         self._method = method
         self._items: list[_StepItem] = []
         self._previewing = False   # True — показан просмотр другого (пройденного) шага
-        # данные, введённые на шаге «Установка образца» — сохраняются между перерисовками
-        self._setup_values = {"load": "", "disp": "", "force": "", "cycles": ""}
-        self._fixture_used = None  # выбор «использовалось ли спец. приспособление» (шаг 1)
-        # данные шага «Параметры испытания» (комбинация + длины сегментов)
-        self._param_values  = {"combo": "", "seg1": "", "seg2": "", "seg3": ""}
-        self._param_fixture = None  # «использовалось ли спец. приспособление» (шаг 2)
-        # первоначальные смещения на нагрузочных рычагах (шаг 3)
-        self._disp_values   = {"lower": "", "upper": ""}
-        self._disp_fixture  = None  # «использовалось ли спец. приспособление» (шаг 3)
-        self._adj_fixture   = None  # «использовалось ли спец. приспособление» (шаг 5)
-        self._adj_disp      = {"lower": "", "upper": ""}  # окончательные смещения (шаг 5)
-        self._arm_values    = {"d11": "", "lower": "", "upper": ""}  # δ11 и плечи рычагов (шаг 6)
-        # δ13, смещения и действительные плечи рычагов при Fcmax (шаг 7)
-        self._fcmax_values  = {"d13": "", "disp_lower": "", "disp_upper": "",
-                               "arm_lower": "", "arm_upper": ""}
-        # разрушение образца при Fcmin (шаг 8): None — выбор не сделан
-        self._fracture      = None
-        self._fcmin_values  = {"force": "", "time": "", "inspect": ""}
-        # стабильные условия цикла (шаг 9): None — выбор не сделан
-        self._stable        = None
-        self._cyclic_values = {"freq": "", "cycles": ""}
-        self._onecycle_values = {"d13": ""}  # регистрация δ13 в одном цикле (шаг 10)
-        # счёт циклов (шаг 11): флаг останова + «достигнуто число циклов?» (None — выбор не сделан)
-        self._stopped11     = False
-        self._reached11     = None
-        self._cycles11_values = {"freq": "", "ncycles": "1·10⁶", "nreplace": "", "nreg": "",
-                                 "reason": "", "duration": "", "inspect": ""}
-        # решение о продолжении испытания (под-шаг ветки «Нет»): None — не выбрано
-        self._continue11    = None
-        self._jump_target   = None  # индекс шага, на который указывает стрелка «→»
-        # ветка «Да» шага 11 — два под-шага (Fcmin / Fcmax): δ, смещения, плечи рычагов
-        self._yes_fcmin = {"d": "", "disp_lower": "", "disp_upper": "", "arm_lower": "", "arm_upper": ""}
-        self._yes_fcmax = {"d": "", "disp_lower": "", "disp_upper": "", "arm_lower": "", "arm_upper": "", "parts": ""}
-        # решение о продолжении испытания во 2-м под-шаге (Fcmax): None — не выбрано
-        self._continue_yes = None
-        self._yes_dest     = None  # выбранный шаг продолжения (индекс): 9 / 4 / 1
-        # шаг 12: разрушение образца, и в ветке «Да» — частота < 3 Гц (None — не выбрано)
-        self._frac12        = None
-        self._freq12        = None
-        self._step12_values = {"ffin": "1750", "v": "от 100 до 250", "t": "30 ± 3", "inspect": ""}
-        # шаг 13: выдержал ли образец испытание (влияет на надпись в протоколе)
-        self._passed13      = None
+        # значения полей form-шагов: {step_id: {field_key: value, "__fixture__": ..., "__decision__": ...}}
+        self._form_values: dict[str, dict] = {}
+        # флаги, выставляемые опциями decision (например, passed для протокола)
+        self._flags: dict = {}
+        self._jump_target = None    # индекс шага, на который указывает стрелка «→»
         self._build_steps()
         if start_index is not None:   # восстановление позиции при смене темы
             self._current = max(0, min(start_index, len(self._steps) - 1))
@@ -494,9 +483,24 @@ class _CyclicWizard(QWidget):
         self._panel.setStyleSheet(
             f"QFrame#wzPanel {{ background: {_WZ['panel_bg']};"
             f" border: 1px solid {_WZ['border']}; border-radius: 8px; }}")
-        self._content = QVBoxLayout(self._panel)
-        self._content.setContentsMargins(16, 14, 16, 14)
+        panel_outer = QVBoxLayout(self._panel)
+        panel_outer.setContentsMargins(6, 6, 6, 6)   # отступ скролла от скруглённой рамки
+        # контент шага — в собственном скролле: панель не меняет размер на «высоких»
+        # шагах, лишнее прокручивается внутри (а не распирает секцию)
+        self._panel_scroll = QScrollArea()
+        self._panel_scroll.setWidgetResizable(True)
+        self._panel_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._panel_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._panel_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self._panel_scroll.viewport().setStyleSheet("background: transparent;")
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        self._content = QVBoxLayout(inner)
+        self._content.setContentsMargins(10, 8, 10, 8)
         self._content.setSpacing(10)
+        self._panel_scroll.setWidget(inner)
+        panel_outer.addWidget(self._panel_scroll)
         body.addWidget(self._panel, 1)
         root.addLayout(body, 1)
 
@@ -505,26 +509,16 @@ class _CyclicWizard(QWidget):
 
     # ── формирование шагов ─────────────────────────────────────────────────
     def _build_steps(self):
-        if self._method == "17.4.5" and self._gost in ("Р ИСО 10328-2021", "Р53868-2021"):
-            self._htitle = "Циклическое испытание замков коленных узлов"
-            self._steps = [
-                {"group": "ПОДГОТОВКА", "title": "Установка образца",                "sub": "Оборудование / приспособление",            "kind": "setup"},
-                {"group": "ПОДГОТОВКА", "title": "Комбинация и значения установленных длин сегментов", "sub": "F=0, длины сегментов", "kind": "params"},
-                {"group": "ПОДГОТОВКА", "title": "Смещения на нагрузочных рычагах",   "sub": "F=0, нижний и верхний рычаги",              "kind": "disp"},
-                {"group": "НАГРУЖЕНИЕ", "title": "Стабилизирующая нагрузка",          "sub": "Fstab = 800 Н, 20 с, F=0 12 мин",           "kind": "stab", "decision": False, "banner": False},
-                {"group": "НАГРУЖЕНИЕ", "title": "Регулировки",                       "sub": "Fstab = 50 Н, приспособление",              "kind": "adjust"},
-                {"group": "НАГРУЖЕНИЕ", "title": "Действительные плечи рычагов",       "sub": "Fstab = 50 Н, δ11, плечи рычагов",          "kind": "arms"},
-                {"group": "НАГРУЖЕНИЕ", "title": "Fcmax",                             "sub": "Fcmax, регистрация δ13",                    "kind": "fcmax"},
-                {"group": "НАГРУЖЕНИЕ", "title": "Fcmin",                             "sub": "Fcmin, контроль разрушения образца",        "kind": "fcmin"},
-                {"group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ", "title": "Циклическое нагружение F-c(t)",     "sub": "F-c(t), частота, стабильные условия",        "kind": "cyclic"},
-                {"group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ", "title": "Один цикл",                        "sub": "Fcmax, δ13, Fcmin",                         "kind": "onecycle"},
-                {"group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ", "title": "Циклическое нагружение — счёт циклов", "sub": "F-c(t), число циклов, останов",          "kind": "cycles11"},
-                {"group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ", "title": "Разрушение образца",                "sub": "Разрушение, частота, нагружение",           "kind": "fracture12"},
-                {"group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ", "title": "Образец выдержал испытание",        "sub": "Оценка результата испытания",               "kind": "passed13"},
-                {"group": "ЗАВЕРШЕНИЕ", "title": "Протокол",                         "sub": "Экспорт результатов",                       "kind": "protocol"},
-            ]
+        data = (_load_methodic(self._gost, self._method)
+                if self._gost in ("Р ИСО 10328-2021", "Р53868-2021") else None)
+        if data:
+            # структура шагов и вложенных под-шагов берётся из JSON-конфига методики
+            self._htitle = data.get("title", "Процедура испытания")
+            self._steps = [dict(s) for s in data["steps"]]
+            self._substeps_cfg = data.get("substeps", {})
             self._current = 0
         else:
+            self._substeps_cfg = {}
             proc = PROCEDURES.get((self._gost, self._method))
             self._htitle, self._steps = _steps_from_procedure(proc or _DEFAULT_PROCEDURE)
             self._current = 0
@@ -640,6 +634,10 @@ class _CyclicWizard(QWidget):
                                            self._items[self._jump_target])
         else:
             self._side_frame.set_connector(None, None)
+        # держать активный шаг в видимой области степпера
+        if 0 <= self._current < len(self._items):
+            active = self._items[self._current]
+            QTimer.singleShot(0, lambda: self._side_scroll.ensureWidgetVisible(active, 0, 40))
 
     def _set_preview_highlight(self, idx):
         """Подсветить фоном (как у активного) выбранный для просмотра шаг — и только его."""
@@ -667,32 +665,70 @@ class _CyclicWizard(QWidget):
         self.started.emit(self._steps[idx]["group"] != "ПОДГОТОВКА")
 
     def _interrupt_test(self):
-        """Кнопка «Прервать» — диалог подтверждения, при согласии сброс к началу."""
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Прерывание испытания")
-        box.setText("Прервать испытание?")
-        box.setInformativeText("Текущий прогресс будет сброшен к первому шагу.")
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        box.setDefaultButton(QMessageBox.StandardButton.No)
-        box.button(QMessageBox.StandardButton.Yes).setText("Да, прервать")
-        box.button(QMessageBox.StandardButton.No).setText("Отмена")
-        if box.exec() == QMessageBox.StandardButton.Yes:
+        """Кнопка «Прервать» — крупный стилизованный диалог подтверждения."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Прерывание испытания")
+        dlg.setModal(True)
+        dlg.setMinimumSize(480, 240)
+        dlg.setStyleSheet(
+            f"QDialog {{ background: {_WZ['panel_bg']}; }}"
+            f" QLabel {{ background: transparent; color: {_WZ['text']}; }}")
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(28, 26, 28, 22)
+        root.setSpacing(16)
+
+        # заголовок с крупной иконкой
+        head = QHBoxLayout()
+        head.setSpacing(16)
+        icon = QLabel("⛔")
+        icon.setStyleSheet(f"color: {_WZ['red']}; font-size: 40px; background: transparent;")
+        head.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        ttl = QLabel("Прервать испытание?")
+        ttl.setWordWrap(True)
+        ttl.setStyleSheet(f"color: {_WZ['title']}; font-size: 20px; font-weight: bold; background: transparent;")
+        head.addWidget(ttl, 1)
+        root.addLayout(head)
+
+        msg = QLabel("Текущий прогресс будет сброшен к первому шагу.\nЭто действие нельзя отменить.")
+        msg.setWordWrap(True)
+        msg.setStyleSheet(f"color: {_WZ['muted']}; font-size: 13px; background: transparent;")
+        root.addWidget(msg)
+
+        root.addStretch()
+
+        btns = QHBoxLayout()
+        btns.setSpacing(10)
+        btns.addStretch()
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setMinimumSize(120, 40)
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.setStyleSheet(
+            f"QPushButton {{ background: {_WZ['btn_bg']}; color: {_WZ['text']};"
+            f" border: 1px solid {_WZ['border']}; border-radius: 8px; padding: 8px 18px; font-size: 14px; }}"
+            f" QPushButton:hover {{ background: {_WZ['card_bg']}; }}")
+        btn_ok = QPushButton("⛔ Да, прервать")
+        btn_ok.setMinimumSize(150, 40)
+        btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_ok.setStyleSheet(
+            f"QPushButton {{ background: {_WZ['red']}; color: white; border: none;"
+            " border-radius: 8px; padding: 8px 18px; font-size: 14px; font-weight: bold; }"
+            " QPushButton:hover { background: #e74c3c; }")
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_ok.clicked.connect(dlg.accept)
+        btns.addWidget(btn_cancel, 0)
+        btns.addWidget(btn_ok, 0)
+        root.addLayout(btns)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
             self._abort_test()
 
     def _abort_test(self):
         """Сброс прогресса визарда к первому шагу после прерывания."""
-        self._fracture = None
-        self._stable = None
-        self._reached11 = None
-        self._continue11 = None
-        self._continue_yes = None
-        self._yes_dest = None
-        self._frac12 = None
-        self._freq12 = None
-        self._passed13 = None
-        self._set_cycles11_substeps()   # убрать вложенные под-шаги шага 11
-        self._set_step12_substeps()     # убрать вложенный под-шаг шага 12
+        self._flags = {}
+        self._form_values = {}    # сброс значений и выбранных веток form-шагов
+        self._jump_target = None
+        self._build_steps()       # перечитать шаги из конфига (убрать вложенные под-шаги)
         self._rebuild_sidebar()
         self._goto(0)
 
@@ -708,6 +744,9 @@ class _CyclicWizard(QWidget):
             item.set_state("done" if i <= done_through else
                            "active" if i == proto else "pending")
         self._render_step(proto)
+        if self._items:
+            active = self._items[proto]
+            QTimer.singleShot(0, lambda: self._side_scroll.ensureWidgetVisible(active, 0, 40))
         self.started.emit(self._steps[proto]["group"] != "ПОДГОТОВКА")
 
     @staticmethod
@@ -720,6 +759,25 @@ class _CyclicWizard(QWidget):
             elif it.layout() is not None:
                 _CyclicWizard._clear(it.layout())
 
+    def _rerender_keep_scroll(self):
+        """Перерисовать текущий шаг, сохранив позицию вертикального скролла
+        (для ветвлений/флагов — чтобы не отбрасывало к началу)."""
+        sb = self._panel_scroll.verticalScrollBar()
+        pos = sb.value()
+        self._render_step(self._current)
+
+        # диапазон скролла пересчитывается после перекомпоновки контента —
+        # восстанавливаем позицию, когда диапазон обновится (и страховкой по таймеру)
+        def _restore(*_):
+            sb.setValue(pos)
+            try:
+                sb.rangeChanged.disconnect(_restore)
+            except TypeError:
+                pass
+
+        sb.rangeChanged.connect(_restore)
+        QTimer.singleShot(0, _restore)
+
     def _render_step(self, idx: int, preview: bool = False):
         self._clear(self._content)
         self._previewing = preview
@@ -731,7 +789,7 @@ class _CyclicWizard(QWidget):
         current_no = sum(1 for s in self._steps[:idx + 1] if not s.get("parent"))
         badge_text = f"⚡ Шаг {current_no} из {total}"
         if preview:
-            badge_text += "  •  просмотр (без перехода)"
+            badge_text += "  •  просмотр"
         badge = QLabel(badge_text)
         badge.setStyleSheet(
             f"background: {_WZ['card_bg']}; color: {_WZ['accent']};"
@@ -742,1069 +800,241 @@ class _CyclicWizard(QWidget):
         badge_row.addStretch()
         self._content.addLayout(badge_row)
 
-        if step["kind"] == "stab":
+        if step["kind"] == "form":
+            self._render_form(step)
+        elif step["kind"] == "stab":
             self._render_stabilization(step.get("decision", True), step.get("banner", True), step.get("inputs", True))
-        elif step["kind"] == "setup":
-            self._render_setup()
-        elif step["kind"] == "params":
-            self._render_params()
-        elif step["kind"] == "disp":
-            self._render_displacements()
-        elif step["kind"] == "adjust":
-            self._render_adjust()
-        elif step["kind"] == "arms":
-            self._render_arms()
-        elif step["kind"] == "fcmax":
-            self._render_fcmax()
-        elif step["kind"] == "fcmin":
-            self._render_fcmin()
-        elif step["kind"] == "cyclic":
-            self._render_cyclic()
-        elif step["kind"] == "onecycle":
-            self._render_onecycle()
-        elif step["kind"] == "cycles11":
-            self._render_cycles11()
-        elif step["kind"] == "shutdown":
-            self._render_shutdown()
-        elif step["kind"] == "yes_fcmin":
-            self._render_fc_delta("Fcmin", "Приложить Fcmin", self._yes_fcmin)
-        elif step["kind"] == "yes_fcmax":
-            self._render_fc_delta("Fcmax", "Приложить Fcmax", self._yes_fcmax, decision=True)
-        elif step["kind"] == "fracture12":
-            self._render_fracture12()
-        elif step["kind"] == "finload":
-            self._render_finload()
-        elif step["kind"] == "passed13":
-            self._render_passed13()
         elif step["kind"] == "protocol":
             self._render_protocol()
         else:
             self._render_action(step, idx)
 
+        # при смене шага показываем контент с начала (полоса прокрутки сохраняет
+        # старое значение при перестройке — иначе верх нового шага «уезжает» вниз);
+        # для перерисовки того же шага позицию восстанавливает _rerender_keep_scroll
+        QTimer.singleShot(0, lambda: self._panel_scroll.verticalScrollBar().setValue(0))
+
     # ── панель навигации шага: в режиме просмотра — только возврат ──────────
     def _step_nav(self, primary_text: str, finish: bool = False) -> QHBoxLayout:
+        # навигационная кнопка — на всю ширину строки, чтобы длинный текст
+        # не вылезал за правый край панели в узкой колонке
         nav = QHBoxLayout()
         if self._previewing:
-            nav.addStretch()
             ret = self._btn("← Вернуться к текущему шагу", primary=True)
             ret.clicked.connect(lambda: self._render_step(self._current))
-            nav.addWidget(ret, 0)
+            nav.addWidget(ret, 1)
             return nav
-        nav.addStretch()
         primary = self._btn("✓ Завершить" if finish else primary_text, primary=True)
         if finish:
             primary.clicked.connect(lambda: self._goto(0))
         else:
             primary.clicked.connect(lambda: self._goto(self._current + 1))
-        nav.addWidget(primary, 0)
+        nav.addWidget(primary, 1)
         return nav
 
-    # ── контент первого шага «Установка образца» ───────────────────────────
-    def _render_setup(self):
-        c = self._content
-        h = QLabel("Установка образца")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        banner = QLabel(
-            "Зарегистрировать уровень нагрузки, значения смещений"
-            " и испытательных сил, числа циклов")
-        banner.setWordWrap(True)
-        banner.setStyleSheet(
-            f"background: {_WZ['card_bg']}; color: {_WZ['text']};"
-            f" border-left: 3px solid {_WZ['blue']}; border-radius: 4px; padding: 8px 12px;")
-        c.addWidget(banner)
-
-        vals = self._setup_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        row1 = QHBoxLayout()
-        row1.setSpacing(8)
-        row1.addLayout(self._input("Уровень нагрузки (Н)",     vals["load"],   _store("load")),   1)
-        row1.addLayout(self._input("Значения смещений (мм)",   vals["disp"],   _store("disp")),   1)
-        c.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(8)
-        row2.addLayout(self._input("Испытательные силы (Н)",   vals["force"],  _store("force")),  1)
-        row2.addLayout(self._input("Число циклов",             vals["cycles"], _store("cycles")), 1)
-        c.addLayout(row2)
-
-        lbl = QLabel("Использовалось специальное приспособление?")
-        lbl.setWordWrap(True)
-        lbl.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(lbl)
-
-        toggle = QHBoxLayout()
-        toggle.setSpacing(8)
-        self._btn_fixture_yes = self._toggle_btn("✓ Да")
-        self._btn_fixture_no  = self._toggle_btn("✕ Нет")
-        self._btn_fixture_yes.clicked.connect(lambda: self._set_fixture(True))
-        self._btn_fixture_no.clicked.connect(lambda: self._set_fixture(False))
-        # пройденный (не текущий) шаг открыт только для просмотра — выбор менять нельзя
-        self._btn_fixture_yes.setEnabled(not self._previewing)
-        self._btn_fixture_no.setEnabled(not self._previewing)
-        toggle.addWidget(self._btn_fixture_yes, 1)
-        toggle.addWidget(self._btn_fixture_no, 1)
-        c.addLayout(toggle)
-        self._set_fixture(self._fixture_used)
-
-        c.addStretch()
-        c.addLayout(self._step_nav("Далее →"))
-
-    # ── контент второго шага «Параметры испытания» ─────────────────────────
-    def _render_params(self):
-        c = self._content
-        h = QLabel("Комбинация и значения установленных длин сегментов")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        # F=0 — обнуление нагрузки перед установкой длин сегментов
-        f0_row = QHBoxLayout()
-        btn_f0 = self._btn("Установить F = 0")
-        btn_f0.setEnabled(not self._previewing)
-        f0_row.addWidget(btn_f0, 0)
-        f0_row.addStretch()
-        c.addLayout(f0_row)
-
-        # инструкция (просто текст)
-        instr = QLabel("Установить длины сегментов образца")
-        instr.setWordWrap(True)
-        instr.setStyleSheet(f"color: {_WZ['text']}; font-weight: bold; background: transparent; padding-top: 4px;")
-        c.addWidget(instr)
-
-        # регистрация комбинации и значений длин сегментов (поля для просмотра и записи)
-        reg = QLabel("Зарегистрировать комбинацию и значения установленных длин сегментов")
-        reg.setWordWrap(True)
-        reg.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(reg)
-
-        vals = self._param_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        row1 = QHBoxLayout()
-        row1.setSpacing(8)
-        row1.addLayout(self._input("Комбинация", vals["combo"], _store("combo")), 1)
-        c.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(8)
-        row2.addLayout(self._input("Длина сегмента 1 (мм)", vals["seg1"], _store("seg1")), 1)
-        row2.addLayout(self._input("Длина сегмента 2 (мм)", vals["seg2"], _store("seg2")), 1)
-        row2.addLayout(self._input("Длина сегмента 3 (мм)", vals["seg3"], _store("seg3")), 1)
-        c.addLayout(row2)
-
-        lbl = QLabel("Использовалось специальное приспособление?")
-        lbl.setWordWrap(True)
-        lbl.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(lbl)
-
-        toggle = QHBoxLayout()
-        toggle.setSpacing(8)
-        self._btn_pfix_yes = self._toggle_btn("✓ Да")
-        self._btn_pfix_no  = self._toggle_btn("✕ Нет")
-        self._btn_pfix_yes.clicked.connect(lambda: self._set_param_fixture(True))
-        self._btn_pfix_no.clicked.connect(lambda: self._set_param_fixture(False))
-        # пройденный (не текущий) шаг открыт только для просмотра — выбор менять нельзя
-        self._btn_pfix_yes.setEnabled(not self._previewing)
-        self._btn_pfix_no.setEnabled(not self._previewing)
-        toggle.addWidget(self._btn_pfix_yes, 1)
-        toggle.addWidget(self._btn_pfix_no, 1)
-        c.addLayout(toggle)
-        self._set_param_fixture(self._param_fixture)
-
-        c.addStretch()
-        c.addLayout(self._step_nav("Далее →"))
-
-    # ── контент третьего шага «Смещения на нагрузочных рычагах» ─────────────
-    def _render_displacements(self):
-        c = self._content
-        h = QLabel("Смещения на нагрузочных рычагах")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        # F=0 — обнуление нагрузки перед установкой смещений
-        f0_row = QHBoxLayout()
-        btn_f0 = self._btn("Установить F = 0")
-        btn_f0.setEnabled(not self._previewing)
-        f0_row.addWidget(btn_f0, 0)
-        f0_row.addStretch()
-        c.addLayout(f0_row)
-
-        # инструкция (просто текст)
-        instr = QLabel("Установить смещения на нижнем и верхнем нагрузочных рычагах")
-        instr.setWordWrap(True)
-        instr.setStyleSheet(f"color: {_WZ['text']}; font-weight: bold; background: transparent; padding-top: 4px;")
-        c.addWidget(instr)
-
-        # регистрация первоначальных смещений (поля для просмотра и записи)
-        reg = QLabel("Записать первоначальные значения смещений")
-        reg.setWordWrap(True)
-        reg.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(reg)
-
-        vals = self._disp_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addLayout(self._input("Нижний рычаг (мм)",  vals["lower"], _store("lower")), 1)
-        row.addLayout(self._input("Верхний рычаг (мм)", vals["upper"], _store("upper")), 1)
-        c.addLayout(row)
-
-        lbl = QLabel("Использовалось специальное приспособление?")
-        lbl.setWordWrap(True)
-        lbl.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(lbl)
-
-        toggle = QHBoxLayout()
-        toggle.setSpacing(8)
-        self._btn_dfix_yes = self._toggle_btn("✓ Да")
-        self._btn_dfix_no  = self._toggle_btn("✕ Нет")
-        self._btn_dfix_yes.clicked.connect(lambda: self._set_disp_fixture(True))
-        self._btn_dfix_no.clicked.connect(lambda: self._set_disp_fixture(False))
-        # пройденный (не текущий) шаг открыт только для просмотра — выбор менять нельзя
-        self._btn_dfix_yes.setEnabled(not self._previewing)
-        self._btn_dfix_no.setEnabled(not self._previewing)
-        toggle.addWidget(self._btn_dfix_yes, 1)
-        toggle.addWidget(self._btn_dfix_no, 1)
-        c.addLayout(toggle)
-        self._set_disp_fixture(self._disp_fixture)
-
-        c.addStretch()
-        c.addLayout(self._step_nav("Далее →"))
-
-    # ── контент пятого шага «Регулировки» ──────────────────────────────────
-    def _render_adjust(self):
-        c = self._content
-        h = QLabel("Регулировки")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        # Fstab = 50 Н — приложить нагрузку для регулировок
-        f_row = QHBoxLayout()
-        btn_f = self._btn("Fstab = 50 Н")
-        btn_f.setEnabled(not self._previewing)
-        f_row.addWidget(btn_f, 0)
-        f_row.addStretch()
-        c.addLayout(f_row)
-
-        # инструкция (просто текст)
-        instr = QLabel("Выполнить регулировки")
-        instr.setWordWrap(True)
-        instr.setStyleSheet(f"color: {_WZ['text']}; font-weight: bold; background: transparent; padding-top: 4px;")
-        c.addWidget(instr)
-
-        # регистрация окончательных смещений (поля для просмотра и записи)
-        reg = QLabel("Записать окончательные значения смещений")
-        reg.setWordWrap(True)
-        reg.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(reg)
-
-        vals = self._adj_disp
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addLayout(self._input("Нижний рычаг (мм)",  vals["lower"], _store("lower")), 1)
-        row.addLayout(self._input("Верхний рычаг (мм)", vals["upper"], _store("upper")), 1)
-        c.addLayout(row)
-
-        lbl = QLabel("Использовалось специальное приспособление?")
-        lbl.setWordWrap(True)
-        lbl.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(lbl)
-
-        toggle = QHBoxLayout()
-        toggle.setSpacing(8)
-        self._btn_afix_yes = self._toggle_btn("✓ Да")
-        self._btn_afix_no  = self._toggle_btn("✕ Нет")
-        self._btn_afix_yes.clicked.connect(lambda: self._set_adj_fixture(True))
-        self._btn_afix_no.clicked.connect(lambda: self._set_adj_fixture(False))
-        # пройденный (не текущий) шаг открыт только для просмотра — выбор менять нельзя
-        self._btn_afix_yes.setEnabled(not self._previewing)
-        self._btn_afix_no.setEnabled(not self._previewing)
-        toggle.addWidget(self._btn_afix_yes, 1)
-        toggle.addWidget(self._btn_afix_no, 1)
-        c.addLayout(toggle)
-        self._set_adj_fixture(self._adj_fixture)
-
-        c.addStretch()
-        c.addLayout(self._step_nav("Далее →"))
-
-    # ── контент шестого шага «Действительные плечи рычагов» ────────────────
-    def _render_arms(self):
-        c = self._content
-        h = QLabel("Действительные плечи рычагов")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        # Fstab = 50 Н — приложить нагрузку
-        f_row = QHBoxLayout()
-        btn_f = self._btn("Fstab = 50 Н")
-        btn_f.setEnabled(not self._previewing)
-        f_row.addWidget(btn_f, 0)
-        f_row.addStretch()
-        c.addLayout(f_row)
-
-        vals = self._arm_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        # регистрация δ11 (поле для просмотра и записи)
-        reg_d11 = QLabel("Регистрация δ11")
-        reg_d11.setWordWrap(True)
-        reg_d11.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(reg_d11)
-
-        d11_row = QHBoxLayout()
-        d11_row.setSpacing(8)
-        d11_row.addLayout(self._input("δ11 (мм)", vals["d11"], _store("d11")), 1)
-        c.addLayout(d11_row)
-
-        # измерить и записать действительные плечи рычагов (поля для просмотра и записи)
-        reg = QLabel("Измерить и записать действительные плечи рычагов")
-        reg.setWordWrap(True)
-        reg.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(reg)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addLayout(self._input("Нижний рычаг (мм)",  vals["lower"], _store("lower")), 1)
-        row.addLayout(self._input("Верхний рычаг (мм)", vals["upper"], _store("upper")), 1)
-        c.addLayout(row)
-
-        c.addStretch()
-        c.addLayout(self._step_nav("Далее →"))
-
-    # ── контент седьмого шага «Fcmax» ──────────────────────────────────────
-    def _render_fcmax(self):
-        c = self._content
-        h = QLabel("Fcmax")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        # приложить максимальную нагрузку цикла Fcmax
-        f_row = QHBoxLayout()
-        btn_f = self._btn("Приложить Fcmax")
-        btn_f.setEnabled(not self._previewing)
-        f_row.addWidget(btn_f, 0)
-        f_row.addStretch()
-        c.addLayout(f_row)
-
-        vals = self._fcmax_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        # регистрация δ13 (поле для просмотра и записи)
-        reg = QLabel("Регистрация δ13")
-        reg.setWordWrap(True)
-        reg.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(reg)
-
-        d13_row = QHBoxLayout()
-        d13_row.setSpacing(8)
-        d13_row.addLayout(self._input("δ13 (мм)", vals["d13"], _store("d13")), 1)
-        c.addLayout(d13_row)
-
-        # измерить и записать смещения (поля для просмотра и записи) шаг 7
-        reg_disp = QLabel("Измерить и записать смещения")
-        reg_disp.setWordWrap(True)
-        reg_disp.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(reg_disp)
-
-        disp_row = QHBoxLayout()
-        disp_row.setSpacing(8)
-        disp_row.addLayout(self._input("Нижний рычаг (мм)",  vals["disp_lower"], _store("disp_lower")), 1)
-        disp_row.addLayout(self._input("Верхний рычаг (мм)", vals["disp_upper"], _store("disp_upper")), 1)
-        c.addLayout(disp_row)
-
-        # действительные плечи рычагов (поля для просмотра и записи)
-        reg_arm = QLabel("Действительные плечи рычагов")
-        reg_arm.setWordWrap(True)
-        reg_arm.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(reg_arm)
-
-        arm_row = QHBoxLayout()
-        arm_row.setSpacing(8)
-        arm_row.addLayout(self._input("Нижний рычаг (мм)",  vals["arm_lower"], _store("arm_lower")), 1)
-        arm_row.addLayout(self._input("Верхний рычаг (мм)", vals["arm_upper"], _store("arm_upper")), 1)
-        c.addLayout(arm_row)
-
-        c.addStretch()
-        c.addLayout(self._step_nav("Далее →"))
-
-    # ── контент восьмого шага «Fcmin» (с ветвлением по разрушению) ─────────
-    def _render_fcmin(self):
-        c = self._content
-        h = QLabel("Fcmin")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        # приложить минимальную нагрузку цикла Fcmin
-        f_row = QHBoxLayout()
-        btn_f = self._btn("Приложить Fcmin")
-        btn_f.setEnabled(not self._previewing)
-        f_row.addWidget(btn_f, 0)
-        f_row.addStretch()
-        c.addLayout(f_row)
-
-        # ── разрушение образца? ───────────────────────────────────────────
-        q = QLabel("Разрушение образца?")
-        q.setWordWrap(True)
-        q.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(q)
-
-        toggle = QHBoxLayout()
-        toggle.setSpacing(8)
-        self._btn_frac_yes = self._toggle_btn("✓ Да")
-        self._btn_frac_no  = self._toggle_btn("✕ Нет")
-        self._btn_frac_yes.clicked.connect(lambda: self._choose_fracture(True))
-        self._btn_frac_no.clicked.connect(lambda: self._choose_fracture(False))
-        self._btn_frac_yes.setEnabled(not self._previewing)
-        self._btn_frac_no.setEnabled(not self._previewing)
-        toggle.addWidget(self._btn_frac_yes, 1)
-        toggle.addWidget(self._btn_frac_no, 1)
-        c.addLayout(toggle)
-        self._style_toggle_pair(self._btn_frac_yes, self._btn_frac_no, self._fracture)
-
-        # ── при «Да» — динамически открываем поля разрушения ──────────────
-        if self._fracture is True:
-            vals = self._fcmin_values
-
-            def _store(key):
-                return lambda text: vals.__setitem__(key, text)
-
-            reg = QLabel("Регистрация F и t при разрушении")
-            reg.setWordWrap(True)
-            reg.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-            c.addWidget(reg)
-
-            ft_row = QHBoxLayout()
-            ft_row.setSpacing(8)
-            ft_row.addLayout(self._input("F при разрушении (Н)", vals["force"], _store("force")), 1)
-            ft_row.addLayout(self._input("t при разрушении (с)", vals["time"],  _store("time")),  1)
-            c.addLayout(ft_row)
-
-            ins = QLabel("Осмотр образца с указанием характера и места повреждения")
-            ins.setWordWrap(True)
-            ins.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-            c.addWidget(ins)
-
-            ins_row = QHBoxLayout()
-            ins_row.setSpacing(8)
-            ins_row.addLayout(self._input("Характер и место повреждения", vals["inspect"], _store("inspect")), 1)
-            c.addLayout(ins_row)
-
-        c.addStretch()
-        if self._previewing:
-            c.addLayout(self._step_nav("Далее →"))
-        elif self._fracture is True:
-            # разрушение → испытание завершено, переход к протоколу
-            nav = QHBoxLayout()
-            nav.addStretch()
-            btn = self._btn("📄 Сформировать протокол", primary=True)
-            btn.clicked.connect(self._goto_protocol_interrupted)
-            nav.addWidget(btn, 0)
-            c.addLayout(nav)
-        elif self._fracture is False:
-            # образец цел → разрешаем переход на следующий шаг
-            c.addLayout(self._step_nav("Далее →"))
-        # выбор не сделан (None) — переход закрыт
-
-    # ── контент девятого шага «Циклическое нагружение F-c(t)» ──────────────
-    def _render_cyclic(self):
-        c = self._content
-        h = QLabel("Циклическое нагружение F-c(t)")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        # запустить циклическое нагружение F-c(t)
-        f_row = QHBoxLayout()
-        btn_f = self._btn("Запустить F-c(t)")
-        btn_f.setEnabled(not self._previewing)
-        f_row.addWidget(btn_f, 0)
-        f_row.addStretch()
-        c.addLayout(f_row)
-
-        vals = self._cyclic_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        freq_row = QHBoxLayout()
-        freq_row.setSpacing(8)
-        freq_row.addLayout(self._input("Частота (Гц)", vals["freq"], _store("freq")), 1)
-        c.addLayout(freq_row)
-
-        # ── достигнуты стабильные условия? ────────────────────────────────
-        q = QLabel("Достигнуты стабильные условия?")
-        q.setWordWrap(True)
-        q.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(q)
-
-        toggle = QHBoxLayout()
-        toggle.setSpacing(8)
-        self._btn_stbl_yes = self._toggle_btn("✓ Да")
-        self._btn_stbl_no  = self._toggle_btn("✕ Нет")
-        self._btn_stbl_yes.clicked.connect(lambda: self._choose_stable(True))
-        self._btn_stbl_no.clicked.connect(lambda: self._choose_stable(False))
-        self._btn_stbl_yes.setEnabled(not self._previewing)
-        self._btn_stbl_no.setEnabled(not self._previewing)
-        toggle.addWidget(self._btn_stbl_yes, 1)
-        toggle.addWidget(self._btn_stbl_no, 1)
-        c.addLayout(toggle)
-        self._style_toggle_pair(self._btn_stbl_yes, self._btn_stbl_no, self._stable)
-
-        # ── при «Да» — остановка оборудования и регистрация числа циклов ──
-        if self._stable is True:
-            stop = QLabel("Остановка оборудования")
-            stop.setWordWrap(True)
-            stop.setStyleSheet(f"color: {_WZ['text']}; font-weight: bold; background: transparent; padding-top: 4px;")
-            c.addWidget(stop)
-
-            reg = QLabel("Регистрация числа циклов для достижения стабильных условий")
-            reg.setWordWrap(True)
-            reg.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-            c.addWidget(reg)
-
-            cyc_row = QHBoxLayout()
-            cyc_row.setSpacing(8)
-            cyc_row.addLayout(self._input("Число циклов", vals["cycles"], _store("cycles")), 1)
-            c.addLayout(cyc_row)
-
-        c.addStretch()
-        if self._previewing or self._stable is True:
-            # условия достигнуты → переход на следующий шаг
-            c.addLayout(self._step_nav("Далее →"))
-        elif self._stable is False:
-            # условия не достигнуты → повторяем цикл
-            rep = QLabel("🔁  Стабильные условия не достигнуты — повторить цикл нагружения")
-            rep.setWordWrap(True)
-            rep.setStyleSheet(
+    # ── универсальный контент «form»: кнопки + блоки полей + тумблер ───────
+    # Описание берётся из JSON-конфига методики (step["body"]); значения полей
+    # хранятся в self._form_values[step_id]. Блоки: button / text / note /
+    # banner / fields / fixture.
+    @staticmethod
+    def _form_setter(store: dict, key: str):
+        return lambda text: store.__setitem__(key, text)
+
+    def _render_block(self, c, store: dict, blk: dict):
+        """Отрисовать один блок form-описания (button/banner/text/note/fields/fixture)."""
+        accents = {"blue": _WZ["blue"], "amber": _WZ["amber"], "red": _WZ["red"], "green": _WZ["green"]}
+        bt = blk.get("type")
+        if bt == "button":
+            row = QHBoxLayout()
+            b = self._btn(blk["text"])
+            b.setEnabled(not self._previewing)
+            row.addWidget(b, 0)
+            row.addStretch()
+            c.addLayout(row)
+        elif bt == "banner":
+            lbl = QLabel(blk["text"])
+            lbl.setWordWrap(True)
+            col = accents.get(blk.get("accent", "blue"), _WZ["blue"])
+            lbl.setStyleSheet(
                 f"background: {_WZ['card_bg']}; color: {_WZ['text']};"
-                f" border-left: 3px solid {_WZ['amber']}; border-radius: 4px; padding: 8px 12px;")
-            c.addWidget(rep)
-            nav = QHBoxLayout()
-            nav.addStretch()
-            btn = self._btn("🔁 Повторить цикл", primary=True)
-            btn.clicked.connect(self._repeat_cycle)
-            nav.addWidget(btn, 0)
-            c.addLayout(nav)
-        # выбор не сделан (None) — переход закрыт
+                f" border-left: 3px solid {col}; border-radius: 4px; padding: 8px 12px;")
+            c.addWidget(lbl)
+        elif bt == "text":
+            lbl = QLabel(blk["text"])
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"color: {_WZ['text']}; font-weight: bold; background: transparent; padding-top: 4px;")
+            c.addWidget(lbl)
+        elif bt == "note":
+            lbl = QLabel(blk["text"])
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
+            c.addWidget(lbl)
+        elif bt == "fields":
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            for it in blk["items"]:
+                key = it["key"]
+                store.setdefault(key, it.get("default", ""))
+                row.addLayout(self._input(it["label"], store[key], self._form_setter(store, key)), 1)
+            c.addLayout(row)
+        elif bt == "fixture":
+            self._render_form_fixture(c, store, blk.get("question", "Использовалось специальное приспособление?"))
+        elif bt == "flag":
+            key = blk["key"]
+            on = bool(store.get(key))
+            row = QHBoxLayout()
+            b = self._toggle_btn(blk["text"])
+            b.setChecked(on)
+            self._style_one_toggle(b, on)
+            b.setEnabled(not self._previewing)
+            b.clicked.connect(lambda _c=False, k=key: self._toggle_flag(store, k))
+            row.addWidget(b, 0)
+            row.addStretch()
+            c.addLayout(row)
+            if on:
+                for sub in blk.get("reveal", []):
+                    self._render_block(c, store, sub)
 
-    # ── контент десятого шага «Один цикл» ──────────────────────────────────
-    def _render_onecycle(self):
+    def _toggle_flag(self, store: dict, key: str):
+        store[key] = not store.get(key)
+        self._rerender_keep_scroll()
+
+    def _render_form(self, step: dict):
         c = self._content
-        h = QLabel("Один цикл")
+        store = self._form_values.setdefault(step.get("id", step["title"]), {})
+
+        h = QLabel(step.get("title", ""))
         h.setWordWrap(True)
         h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
         c.addWidget(h)
 
-        # Fcmax
-        fmax_row = QHBoxLayout()
-        btn_fmax = self._btn("Приложить Fcmax")
-        btn_fmax.setEnabled(not self._previewing)
-        fmax_row.addWidget(btn_fmax, 0)
-        fmax_row.addStretch()
-        c.addLayout(fmax_row)
+        for blk in step.get("body", []):
+            self._render_block(c, store, blk)
 
-        vals = self._onecycle_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        # регистрация δ13 (поле для просмотра и записи)
-        reg = QLabel("Регистрация δ13")
-        reg.setWordWrap(True)
-        reg.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(reg)
-
-        d13_row = QHBoxLayout()
-        d13_row.setSpacing(8)
-        d13_row.addLayout(self._input("δ13 (мм)", vals["d13"], _store("d13")), 1)
-        c.addLayout(d13_row)
-
-        # Fcmin
-        fmin_row = QHBoxLayout()
-        btn_fmin = self._btn("Приложить Fcmin")
-        btn_fmin.setEnabled(not self._previewing)
-        fmin_row.addWidget(btn_fmin, 0)
-        fmin_row.addStretch()
-        c.addLayout(fmin_row)
-
-        c.addStretch()
-        c.addLayout(self._step_nav("Далее →"))
-
-    # ── контент одиннадцатого шага «Счёт циклов» (с ветвлением) ────────────
-    def _render_cycles11(self):
-        c = self._content
-        h = QLabel("Циклическое нагружение — счёт циклов")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        # запустить циклическое нагружение F-c(t)
-        f_row = QHBoxLayout()
-        btn_f = self._btn("Запустить F-c(t)")
-        btn_f.setEnabled(not self._previewing)
-        f_row.addWidget(btn_f, 0)
-        f_row.addStretch()
-        c.addLayout(f_row)
-
-        vals = self._cycles11_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        # частота + число циклов
-        row1 = QHBoxLayout()
-        row1.setSpacing(8)
-        row1.addLayout(self._input("Частота (Гц)", vals["freq"], _store("freq")), 1)
-        row1.addLayout(self._input("Число циклов", vals["ncycles"], _store("ncycles")), 1)
-        c.addLayout(row1)
-
-        # число циклов до замены деталей
-        row2 = QHBoxLayout()
-        row2.setSpacing(8)
-        row2.addLayout(self._input("Число циклов до замены деталей", vals["nreplace"], _store("nreplace")), 1)
-        c.addLayout(row2)
-
-        # ── остановка оборудования: флаг + кнопка → регистрация числа циклов ──
-        stop_row = QHBoxLayout()
-        stop_row.setSpacing(8)
-        btn_stop = self._toggle_btn("⏹ Остановка оборудования")
-        btn_stop.setChecked(self._stopped11)
-        btn_stop.clicked.connect(self._toggle_stop11)
-        btn_stop.setEnabled(not self._previewing)
-        if self._stopped11:
-            btn_stop.setStyleSheet(
-                f"QPushButton {{ background: {_WZ['blue']}; color: white; border: none;"
-                " border-radius: 6px; padding: 6px 14px; font-weight: bold; }")
+        dec = step.get("decision")
+        if dec:
+            self._render_decision(step, store, dec)
         else:
-            btn_stop.setStyleSheet(
-                f"QPushButton {{ background: {_WZ['btn_bg']}; color: {_WZ['text']};"
-                f" border: 1px solid {_WZ['border']}; border-radius: 6px; padding: 6px 12px; }}"
-                f" QPushButton:hover {{ background: {_WZ['card_bg']}; }}")
-        stop_row.addWidget(btn_stop, 0)
-        stop_row.addStretch()
-        c.addLayout(stop_row)
-
-        if self._stopped11:
-            reg = QLabel("Регистрация числа циклов")
-            reg.setWordWrap(True)
-            reg.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-            c.addWidget(reg)
-            nreg_row = QHBoxLayout()
-            nreg_row.setSpacing(8)
-            nreg_row.addLayout(self._input("Число циклов (зарегистрировано)", vals["nreg"], _store("nreg")), 1)
-            c.addLayout(nreg_row)
-
-        # ── достигнуто число циклов? ──────────────────────────────────────
-        q = QLabel("Достигнуто число циклов?")
-        q.setWordWrap(True)
-        q.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(q)
-
-        toggle = QHBoxLayout()
-        toggle.setSpacing(8)
-        self._btn_rch_yes = self._toggle_btn("✓ Да")
-        self._btn_rch_no  = self._toggle_btn("✕ Нет")
-        self._btn_rch_yes.clicked.connect(lambda: self._choose_reached11(True))
-        self._btn_rch_no.clicked.connect(lambda: self._choose_reached11(False))
-        self._btn_rch_yes.setEnabled(not self._previewing)
-        self._btn_rch_no.setEnabled(not self._previewing)
-        toggle.addWidget(self._btn_rch_yes, 1)
-        toggle.addWidget(self._btn_rch_no, 1)
-        c.addLayout(toggle)
-        self._style_toggle_pair(self._btn_rch_yes, self._btn_rch_no, self._reached11)
-
-        c.addStretch()
-        # выбор сделан (Да или Нет) → ниже в степпере появился вложенный под-шаг,
-        # «Далее» ведёт в него
-        if self._previewing or self._reached11 is not None:
-            c.addLayout(self._step_nav("Далее →"))
-
-    # ── вложенный под-шаг ветки «Нет»: регистрация отключения ──────────────
-    def _render_shutdown(self):
-        c = self._content
-        h = QLabel("Регистрация отключения")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        vals = self._cycles11_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        reason = QLabel("Регистрация причины отключения")
-        reason.setWordWrap(True)
-        reason.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(reason)
-        rr = QHBoxLayout()
-        rr.setSpacing(8)
-        rr.addLayout(self._input("Причина отключения", vals["reason"], _store("reason")), 1)
-        c.addLayout(rr)
-
-        dur = QLabel("Регистрация продолжительности отключения (дата, время)")
-        dur.setWordWrap(True)
-        dur.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(dur)
-        dr = QHBoxLayout()
-        dr.setSpacing(8)
-        dr.addLayout(self._input("Продолжительность отключения (дата, время)", vals["duration"], _store("duration")), 1)
-        c.addLayout(dr)
-
-        ins = QLabel("Регистрация осмотра образца")
-        ins.setWordWrap(True)
-        ins.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(ins)
-        ir = QHBoxLayout()
-        ir.setSpacing(8)
-        ir.addLayout(self._input("Осмотр образца", vals["inspect"], _store("inspect")), 1)
-        c.addLayout(ir)
-
-        # ── решение о продолжении испытания ───────────────────────────────
-        dec = QLabel("Решение о продолжении испытания")
-        dec.setWordWrap(True)
-        dec.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(dec)
-
-        toggle = QHBoxLayout()
-        toggle.setSpacing(8)
-        self._btn_cont_yes = self._toggle_btn("✓ Продолжить")
-        self._btn_cont_no  = self._toggle_btn("✕ Не продолжать")
-        self._btn_cont_yes.clicked.connect(lambda: self._choose_continue(True))
-        self._btn_cont_no.clicked.connect(lambda: self._choose_continue(False))
-        self._btn_cont_yes.setEnabled(not self._previewing)
-        self._btn_cont_no.setEnabled(not self._previewing)
-        toggle.addWidget(self._btn_cont_yes, 1)
-        toggle.addWidget(self._btn_cont_no, 1)
-        c.addLayout(toggle)
-        self._style_toggle_pair(self._btn_cont_yes, self._btn_cont_no, self._continue11)
-
-        c.addStretch()
-        if self._previewing:
-            c.addLayout(self._step_nav("Далее →"))
-        elif self._continue11 is True:
-            # продолжить → стрелка на шаг 9 (циклическое F-c(t)) и переход туда
-            target = next(i for i, s in enumerate(self._steps) if s.get("kind") == "cyclic")
-            self._jump_target = target
-            self._refresh_sidebar()
-            nav = QHBoxLayout()
-            nav.addStretch()
-            btn = self._btn("Далее →", primary=True)
-            # _checked поглощает bool из сигнала clicked, чтобы он не подменил target
-            btn.clicked.connect(lambda _checked=False, t=target: self._goto(t))
-            nav.addWidget(btn, 0)
-            c.addLayout(nav)
-        elif self._continue11 is False:
-            # не продолжать → без стрелки, обычный переход на следующий шаг
-            self._jump_target = None
-            self._refresh_sidebar()
-            c.addLayout(self._step_nav("Далее →"))
-        # выбор не сделан (None) — переход закрыт
-
-    # ── вложенные под-шаги ветки «Да»: Fcmin / Fcmax (δ, смещения, плечи) ──
-    def _render_fc_delta(self, title: str, btn_label: str, vals: dict, decision: bool = False):
-        c = self._content
-        h = QLabel(title)
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        # приложить нагрузку (Fcmin / Fcmax)
-        f_row = QHBoxLayout()
-        btn_f = self._btn(btn_label)
-        btn_f.setEnabled(not self._previewing)
-        f_row.addWidget(btn_f, 0)
-        f_row.addStretch()
-        c.addLayout(f_row)
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        # регистрация δ
-        reg_d = QLabel("Регистрация δ")
-        reg_d.setWordWrap(True)
-        reg_d.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(reg_d)
-        d_row = QHBoxLayout()
-        d_row.setSpacing(8)
-        d_row.addLayout(self._input("δ (мм)", vals["d"], _store("d")), 1)
-        c.addLayout(d_row)
-
-        # измерить и записать смещения
-        reg_disp = QLabel("Измерить и записать смещения")
-        reg_disp.setWordWrap(True)
-        reg_disp.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(reg_disp)
-        disp_row = QHBoxLayout()
-        disp_row.setSpacing(8)
-        disp_row.addLayout(self._input("Нижний рычаг (мм)",  vals["disp_lower"], _store("disp_lower")), 1)
-        disp_row.addLayout(self._input("Верхний рычаг (мм)", vals["disp_upper"], _store("disp_upper")), 1)
-        c.addLayout(disp_row)
-
-        # действительные плечи рычагов
-        reg_arm = QLabel("Действительные плечи рычагов")
-        reg_arm.setWordWrap(True)
-        reg_arm.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(reg_arm)
-        arm_row = QHBoxLayout()
-        arm_row.setSpacing(8)
-        arm_row.addLayout(self._input("Нижний рычаг (мм)",  vals["arm_lower"], _store("arm_lower")), 1)
-        arm_row.addLayout(self._input("Верхний рычаг (мм)", vals["arm_upper"], _store("arm_upper")), 1)
-        c.addLayout(arm_row)
-
-        if not decision:
             c.addStretch()
             c.addLayout(self._step_nav("Далее →"))
+
+    # ── интерпретатор ветвления «decision» (вопрос + варианты, вложенность) ─
+    def _resolve_target(self, goto) -> int:
+        """Индекс целевого шага: 'next'/'prev' или id шага."""
+        if goto in (None, "next"):
+            return self._current + 1
+        if goto == "prev":
+            return self._current - 1
+        idx = next((i for i, s in enumerate(self._steps) if s.get("id") == goto), None)
+        return idx if idx is not None else self._current + 1
+
+    def _set_substeps(self, parent_id: str, value):
+        """Вставить вложенные под-шаги для выбора value (ключ конфига
+        '<parent_id>_<value>'); прежние под-шаги этого родителя удаляются."""
+        self._steps = [s for s in self._steps if s.get("parent") != parent_id]
+        anchor = next((i for i, s in enumerate(self._steps) if s.get("id") == parent_id), None)
+        if anchor is None:
             return
+        grp = self._steps[anchor]["group"]
+        subs = self._substeps_cfg.get(f"{parent_id}_{value}", [])
+        for off, s in enumerate(subs):
+            self._steps.insert(anchor + 1 + off, dict(s, group=grp))
 
-        # ── решение о продолжении испытания (только 2-й под-шаг, Fcmax) ────
-        dec = QLabel("Решение о продолжении испытания")
-        dec.setWordWrap(True)
-        dec.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-        c.addWidget(dec)
+    def _choose_decision(self, step: dict, store: dict, key: str, value):
+        store[key] = value
+        # сбросить вложенные решения уровнем ниже
+        for k in [k for k in store if k.startswith(key + "_")]:
+            del store[k]
+        # верхнеуровневое решение может разворачивать вложенные под-шаги в степпере
+        if key == "__decision__":
+            pid = step.get("id")
+            if pid and any(k.startswith(pid + "_") for k in self._substeps_cfg):
+                self._set_substeps(pid, value)
+                self._rebuild_sidebar()
+        self._rerender_keep_scroll()
 
-        toggle = QHBoxLayout()
-        toggle.setSpacing(8)
-        self._btn_cy_yes = self._toggle_btn("✓ Продолжить")
-        self._btn_cy_no  = self._toggle_btn("✕ Не продолжать")
-        self._btn_cy_yes.clicked.connect(lambda: self._choose_continue_yes(True))
-        self._btn_cy_no.clicked.connect(lambda: self._choose_continue_yes(False))
-        self._btn_cy_yes.setEnabled(not self._previewing)
-        self._btn_cy_no.setEnabled(not self._previewing)
-        toggle.addWidget(self._btn_cy_yes, 1)
-        toggle.addWidget(self._btn_cy_no, 1)
-        c.addLayout(toggle)
-        self._style_toggle_pair(self._btn_cy_yes, self._btn_cy_no, self._continue_yes)
+    def _render_decision(self, step: dict, store: dict, dec: dict, key: str = "__decision__"):
+        c = self._content
+        chosen = store.get(key)
 
-        # при «Да» — замена деталей + выбор шага продолжения (3 пути)
-        if self._continue_yes is True:
-            rep = QLabel("Замена деталей")
-            rep.setWordWrap(True)
-            rep.setStyleSheet(f"color: {_WZ['text']}; font-weight: bold; background: transparent; padding-top: 4px;")
-            c.addWidget(rep)
-            pr = QHBoxLayout()
-            pr.setSpacing(8)
-            pr.addLayout(self._input("Конкретные заменённые детали", vals["parts"], _store("parts")), 1)
-            c.addLayout(pr)
+        q = QLabel(dec["question"])
+        q.setWordWrap(True)
+        q.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
+        c.addWidget(q)
 
-            # выбор, с какого шага продолжить испытание
-            dlbl = QLabel("Продолжить с шага:")
-            dlbl.setWordWrap(True)
-            dlbl.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-            c.addWidget(dlbl)
+        trow = QHBoxLayout()
+        trow.setSpacing(8)
+        for opt in dec["options"]:
+            b = self._toggle_btn(opt["label"])
+            b.setEnabled(not self._previewing)
+            b.clicked.connect(lambda _c=False, v=opt["value"]: self._choose_decision(step, store, key, v))
+            self._style_one_toggle(b, chosen == opt["value"])
+            trow.addWidget(b, 1)
+        c.addLayout(trow)
 
-            dests = QHBoxLayout()
-            dests.setSpacing(8)
-            for caption, idx in (("Шаг 9", self._step_idx("cyclic")),
-                                 ("Шаг 4", self._step_idx_step4()),
-                                 ("Шаг 1", self._step_idx("setup"))):
-                b = self._toggle_btn(caption)
-                b.setEnabled(not self._previewing and idx is not None)
-                b.clicked.connect(lambda _c=False, t=idx: self._choose_yes_dest(t))
-                self._style_one_toggle(b, self._yes_dest == idx)
-                dests.addWidget(b, 1)
-            c.addLayout(dests)
+        opt = next((o for o in dec["options"] if o["value"] == chosen), None)
+        if opt:
+            for blk in opt.get("reveal", []):
+                self._render_block(c, store, blk)
+            if "decision" in opt:           # вложенное решение рисует свою навигацию
+                self._render_decision(step, store, opt["decision"], key=key + "_n")
+                return
 
         c.addStretch()
         if self._previewing:
             c.addLayout(self._step_nav("Далее →"))
-        elif self._continue_yes is True and self._yes_dest is not None:
-            # продолжить → стрелка на выбранный шаг и переход туда
-            self._jump_target = self._yes_dest
+            return
+        if opt is None:
+            self._jump_target = None
             self._refresh_sidebar()
+            return
+        if opt.get("repeat"):
             nav = QHBoxLayout()
-            nav.addStretch()
-            btn = self._btn("Далее →", primary=True)
-            btn.clicked.connect(lambda _checked=False, t=self._yes_dest: self._goto(t))
-            nav.addWidget(btn, 0)
+            rb = self._btn(opt.get("repeat_button", "🔁 Повторить"), primary=True)
+            rb.clicked.connect(lambda _c=False: self._choose_decision(step, store, key, None))
+            nav.addWidget(rb, 1)
             c.addLayout(nav)
-        elif self._continue_yes is False:
-            # не продолжать → без стрелки, обычный переход на следующий шаг
-            self._jump_target = None
-            self._refresh_sidebar()
-            c.addLayout(self._step_nav("Далее →"))
-        else:
-            # «Да» без выбранного шага продолжения → переход закрыт, стрелки нет
-            self._jump_target = None
-            self._refresh_sidebar()
-
-    # ── шаг 12: разрушение образца (с ветвлением) ──────────────────────────
-    def _render_fracture12(self):
-        c = self._content
-        h = QLabel("Разрушение образца")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        vals = self._step12_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        # разрушение образца?
-        q = QLabel("Разрушение образца?")
-        q.setWordWrap(True)
-        q.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(q)
-
-        t1 = QHBoxLayout()
-        t1.setSpacing(8)
-        self._btn_f12_yes = self._toggle_btn("✓ Да")
-        self._btn_f12_no  = self._toggle_btn("✕ Нет")
-        self._btn_f12_yes.clicked.connect(lambda: self._choose_frac12(True))
-        self._btn_f12_no.clicked.connect(lambda: self._choose_frac12(False))
-        self._btn_f12_yes.setEnabled(not self._previewing)
-        self._btn_f12_no.setEnabled(not self._previewing)
-        t1.addWidget(self._btn_f12_yes, 1)
-        t1.addWidget(self._btn_f12_no, 1)
-        c.addLayout(t1)
-        self._style_toggle_pair(self._btn_f12_yes, self._btn_f12_no, self._frac12)
-
-        # ── ветка «Да» — вопрос про частоту (инлайн) ──────────────────────
-        if self._frac12 is True:
-            q2 = QLabel("Частота < 3 Гц?")
-            q2.setWordWrap(True)
-            q2.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
-            c.addWidget(q2)
-
-            t2 = QHBoxLayout()
-            t2.setSpacing(8)
-            self._btn_fr_yes = self._toggle_btn("✓ Да")
-            self._btn_fr_no  = self._toggle_btn("✕ Нет")
-            self._btn_fr_yes.clicked.connect(lambda: self._choose_freq12(True))
-            self._btn_fr_no.clicked.connect(lambda: self._choose_freq12(False))
-            self._btn_fr_yes.setEnabled(not self._previewing)
-            self._btn_fr_no.setEnabled(not self._previewing)
-            t2.addWidget(self._btn_fr_yes, 1)
-            t2.addWidget(self._btn_fr_no, 1)
-            c.addLayout(t2)
-            self._style_toggle_pair(self._btn_fr_yes, self._btn_fr_no, self._freq12)
-
-            if self._freq12 is True:
-                ins = QLabel("Осмотр образца с указанием характера и места повреждения")
-                ins.setWordWrap(True)
-                ins.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-                c.addWidget(ins)
-                ir = QHBoxLayout()
-                ir.setSpacing(8)
-                ir.addLayout(self._input("Характер и место повреждения", vals["inspect"], _store("inspect")), 1)
-                c.addLayout(ir)
-            elif self._freq12 is False:
-                note = QLabel("🔁  Повторить испытание нового образца на частоте < 3 Гц")
-                note.setWordWrap(True)
-                note.setStyleSheet(
-                    f"background: {_WZ['card_bg']}; color: {_WZ['text']};"
-                    f" border-left: 3px solid {_WZ['amber']}; border-radius: 4px; padding: 8px 12px;")
-                c.addWidget(note)
-
-        c.addStretch()
-        # ── навигация ─────────────────────────────────────────────────────
-        if self._previewing:
-            c.addLayout(self._step_nav("Далее →"))
-        elif self._frac12 is False:
-            # разрушения нет → переход во вложенный под-шаг «Окончательное нагружение»
-            self._jump_target = None
-            self._refresh_sidebar()
-            c.addLayout(self._step_nav("Далее →"))
-        elif self._frac12 is True and self._freq12 is True:
-            # частота < 3 Гц → осмотр, далее на следующий невложенный шаг
-            self._jump_target = None
-            self._refresh_sidebar()
-            c.addLayout(self._step_nav("Далее →"))
-        elif self._frac12 is True and self._freq12 is False:
-            # частота не < 3 Гц → повторить на новом образце, стрелка к шагу 1
-            target = self._step_idx("setup")
-            self._jump_target = target
-            self._refresh_sidebar()
-            nav = QHBoxLayout()
-            nav.addStretch()
-            btn = self._btn("Далее →", primary=True)
-            btn.clicked.connect(lambda _checked=False, t=target: self._goto(t))
-            nav.addWidget(btn, 0)
-            c.addLayout(nav)
-        else:
-            # выбор не завершён → переход закрыт
-            self._jump_target = None
-            self._refresh_sidebar()
-
-    # ── под-шаг ветки «Нет» шага 12: окончательное нагружение ──────────────
-    def _render_finload(self):
-        c = self._content
-        h = QLabel("Окончательное нагружение")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        vals = self._step12_values
-
-        def _store(key):
-            return lambda text: vals.__setitem__(key, text)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addLayout(self._input("Ffin (Н)", vals["ffin"], _store("ffin")), 1)
-        row.addLayout(self._input("V (Н/с)", vals["v"], _store("v")), 1)
-        row.addLayout(self._input("t (с)", vals["t"], _store("t")), 1)
-        c.addLayout(row)
-
-        c.addStretch()
-        c.addLayout(self._step_nav("Далее →"))
-
-    # ── шаг 13: образец выдержал испытание? ────────────────────────────────
-    def _render_passed13(self):
-        c = self._content
-        h = QLabel("Образец выдержал испытание")
-        h.setWordWrap(True)
-        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
-        c.addWidget(h)
-
-        q = QLabel("Образец выдержал испытание?")
-        q.setWordWrap(True)
-        q.setStyleSheet(f"color: {_WZ['muted']}; background: transparent;")
-        c.addWidget(q)
-
-        toggle = QHBoxLayout()
-        toggle.setSpacing(8)
-        self._btn_p13_yes = self._toggle_btn("✓ Да")
-        self._btn_p13_no  = self._toggle_btn("✕ Нет")
-        self._btn_p13_yes.clicked.connect(lambda: self._choose_passed13(True))
-        self._btn_p13_no.clicked.connect(lambda: self._choose_passed13(False))
-        self._btn_p13_yes.setEnabled(not self._previewing)
-        self._btn_p13_no.setEnabled(not self._previewing)
-        toggle.addWidget(self._btn_p13_yes, 1)
-        toggle.addWidget(self._btn_p13_no, 1)
-        c.addLayout(toggle)
-        self._style_toggle_pair(self._btn_p13_yes, self._btn_p13_no, self._passed13)
-
-        c.addStretch()
-        self._jump_target = None
+            return
+        # переход на целевой шаг (+ опц. стрелка / флаги / «прерванный» протокол)
+        target = self._resolve_target(opt.get("goto", "next"))
+        self._jump_target = target if opt.get("arrow") else None
         self._refresh_sidebar()
-        # и «Да», и «Нет» → переход на следующий шаг (протокол), без стрелки
-        if self._previewing or self._passed13 is not None:
-            c.addLayout(self._step_nav("Далее →"))
+        nav = QHBoxLayout()
+        btn = self._btn(opt.get("button", "Далее →"), primary=True)
+        btn.clicked.connect(lambda _c=False, o=opt, t=target: self._decision_go(o, t))
+        nav.addWidget(btn, 1)
+        c.addLayout(nav)
+
+    def _decision_go(self, opt: dict, target: int):
+        self._flags.update(opt.get("set", {}))
+        if opt.get("interrupted"):
+            self._goto_protocol_interrupted()
+        else:
+            self._goto(target)
+
+    def _render_form_fixture(self, c, store: dict, question: str):
+        lbl = QLabel(question)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"color: {_WZ['muted']}; background: transparent; padding-top: 4px;")
+        c.addWidget(lbl)
+
+        toggle = QHBoxLayout()
+        toggle.setSpacing(8)
+        yes = self._toggle_btn("✓ Да")
+        no  = self._toggle_btn("✕ Нет")
+
+        def set_fix(v):
+            store["__fixture__"] = v
+            self._style_toggle_pair(yes, no, v)
+
+        yes.clicked.connect(lambda _c=False: set_fix(True))
+        no.clicked.connect(lambda _c=False: set_fix(False))
+        yes.setEnabled(not self._previewing)
+        no.setEnabled(not self._previewing)
+        toggle.addWidget(yes, 1)
+        toggle.addWidget(no, 1)
+        c.addLayout(toggle)
+        set_fix(store.get("__fixture__"))
 
     # ── последний шаг: протокол (с надписью о несоответствии при «Нет») ────
     def _render_protocol(self):
@@ -1814,7 +1044,7 @@ class _CyclicWizard(QWidget):
         h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
         c.addWidget(h)
 
-        if self._passed13 is False:
+        if self._flags.get("passed") is False:
             warn = QLabel("Образец не удовлетворяет требованиям")
             warn.setWordWrap(True)
             warn.setStyleSheet(
@@ -1827,9 +1057,8 @@ class _CyclicWizard(QWidget):
             c.addLayout(self._step_nav("Далее →"))
             return
         nav = QHBoxLayout()
-        nav.addStretch()
         btn = self._btn("📄 Генерация протокола", primary=True)
-        nav.addWidget(btn, 0)
+        nav.addWidget(btn, 1)
         c.addLayout(nav)
 
     # ── кнопка-переключатель: меняет цвет при нажатии ───────────────────────
@@ -1844,147 +1073,24 @@ class _CyclicWizard(QWidget):
         """Подсветить одиночную кнопку-тумблер (выбран / не выбран)."""
         if active:
             btn.setChecked(True)
+            # та же геометрия, что у неактивной (рамка 1px, паддинг, bold) —
+            # отличается только цвет, чтобы кнопка не меняла размер при нажатии
             btn.setStyleSheet(
-                f"QPushButton {{ background: {_WZ['blue']}; color: white; border: none;"
-                " border-radius: 6px; padding: 6px 14px; font-weight: bold; }")
+                f"QPushButton {{ background: {_WZ['blue']}; color: white;"
+                f" border: 1px solid {_WZ['blue']}; border-radius: 6px;"
+                " padding: 6px 12px; font-weight: bold; }")
         else:
             btn.setChecked(False)
             btn.setStyleSheet(
                 f"QPushButton {{ background: {_WZ['btn_bg']}; color: {_WZ['text']};"
-                f" border: 1px solid {_WZ['border']}; border-radius: 6px; padding: 6px 12px; }}"
+                f" border: 1px solid {_WZ['border']}; border-radius: 6px;"
+                " padding: 6px 12px; font-weight: bold; }"
                 f" QPushButton:hover {{ background: {_WZ['card_bg']}; }}")
 
     def _style_toggle_pair(self, btn_yes, btn_no, used):
         """Подсветить «Да/Нет» по выбранному значению (общая для шагов 1 и 2)."""
         self._style_one_toggle(btn_yes, used is True)
         self._style_one_toggle(btn_no, used is False)
-
-    def _set_fixture(self, used):
-        self._fixture_used = used
-        self._style_toggle_pair(self._btn_fixture_yes, self._btn_fixture_no, used)
-
-    def _set_param_fixture(self, used):
-        self._param_fixture = used
-        self._style_toggle_pair(self._btn_pfix_yes, self._btn_pfix_no, used)
-
-    def _set_disp_fixture(self, used):
-        self._disp_fixture = used
-        self._style_toggle_pair(self._btn_dfix_yes, self._btn_dfix_no, used)
-
-    def _set_adj_fixture(self, used):
-        self._adj_fixture = used
-        self._style_toggle_pair(self._btn_afix_yes, self._btn_afix_no, used)
-
-    def _choose_fracture(self, used):
-        """Выбор «разрушение образца» — перерисовать шаг (поля появляются/скрываются)."""
-        self._fracture = used
-        self._render_step(self._current)
-
-    def _choose_stable(self, reached):
-        """Выбор «достигнуты стабильные условия» — перерисовать шаг."""
-        self._stable = reached
-        self._render_step(self._current)
-
-    def _repeat_cycle(self):
-        """Стабильные условия не достигнуты — повторяем цикл (сброс выбора)."""
-        self._stable = None
-        self._render_step(self._current)
-
-    def _toggle_stop11(self):
-        """Флаг «Остановка оборудования» (шаг 11) — открывает регистрацию числа циклов."""
-        self._stopped11 = not self._stopped11
-        self._render_step(self._current)
-
-    def _choose_reached11(self, reached):
-        """Выбор «достигнуто число циклов» (шаг 11) — вставить вложенные под-шаги
-        в левый степпер и перерисовать."""
-        self._reached11 = reached
-        self._set_cycles11_substeps()
-        self._rebuild_sidebar()
-        self._render_step(self._current)
-
-    def _set_cycles11_substeps(self):
-        """Сформировать вложенные под-шаги шага 11 по выбору «достигнуто число циклов».
-        Под-шаги помечаются parent='cycles11' и indent=True (отступ в степпере)."""
-        # убрать прежние под-шаги шага 11
-        self._steps = [s for s in self._steps if s.get("parent") != "cycles11"]
-        anchor = next((i for i, s in enumerate(self._steps) if s.get("kind") == "cycles11"), None)
-        if anchor is None:
-            return   # шага cycles11 нет (например, не 17.4.5) — вложенных под-шагов не бывает
-        grp = self._steps[anchor]["group"]
-        subs = []
-        if self._reached11 is False:
-            subs = [{"group": grp, "indent": True, "parent": "cycles11", "kind": "shutdown",
-                     "title": "Регистрация отключения", "sub": "Причина, продолжительность, осмотр"}]
-        elif self._reached11 is True:
-            subs = [{"group": grp, "indent": True, "parent": "cycles11", "kind": "yes_fcmin",
-                     "title": "Fcmin", "sub": "δ, смещения, плечи рычагов"},
-                    {"group": grp, "indent": True, "parent": "cycles11", "kind": "yes_fcmax",
-                     "title": "Fcmax", "sub": "δ, смещения, плечи рычагов"}]
-        for off, s in enumerate(subs):
-            self._steps.insert(anchor + 1 + off, s)
-
-    def _set_step12_substeps(self):
-        """Под-шаг шага 12 в ветке «Нет» (разрушения нет) — «Окончательное нагружение»."""
-        self._steps = [s for s in self._steps if s.get("parent") != "fracture12"]
-        anchor = next((i for i, s in enumerate(self._steps) if s.get("kind") == "fracture12"), None)
-        if anchor is None:
-            return
-        if self._frac12 is False:
-            sub = {"group": self._steps[anchor]["group"], "indent": True, "parent": "fracture12",
-                   "kind": "finload", "title": "Окончательное нагружение", "sub": "Ffin, V, t"}
-            self._steps.insert(anchor + 1, sub)
-
-    def _choose_frac12(self, val):
-        """Выбор «разрушение образца» на шаге 12. «Нет» → под-шаг нагружения."""
-        self._frac12 = val
-        self._freq12 = None
-        self._set_step12_substeps()
-        self._rebuild_sidebar()
-        self._render_step(self._current)
-
-    def _choose_freq12(self, val):
-        """Выбор «частота < 3 Гц» в ветке «Да» шага 12."""
-        self._freq12 = val
-        self._render_step(self._current)
-
-    def _choose_passed13(self, val):
-        """Выбор «образец выдержал испытание» на шаге 13."""
-        self._passed13 = val
-        self._render_step(self._current)
-
-    def _next_nonnested(self, idx: int) -> int:
-        """Индекс первого невложенного шага после idx (следующий обычный шаг)."""
-        for j in range(idx + 1, len(self._steps)):
-            if not self._steps[j].get("parent"):
-                return j
-        return len(self._steps) - 1
-
-    def _step_idx(self, kind: str):
-        """Индекс первого шага заданного типа (или None)."""
-        return next((i for i, s in enumerate(self._steps) if s.get("kind") == kind), None)
-
-    def _step_idx_step4(self):
-        """Индекс шага 4 («Стабилизирующая нагрузка» — stab с decision=False)."""
-        return next((i for i, s in enumerate(self._steps)
-                     if s.get("kind") == "stab" and s.get("decision") is False), None)
-
-    def _choose_continue(self, cont):
-        """Решение о продолжении испытания (под-шаг ветки «Нет»). Цель перехода и
-        стрелка вычисляются в _render_shutdown по значению self._continue11."""
-        self._continue11 = cont
-        self._render_step(self._current)
-
-    def _choose_continue_yes(self, cont):
-        """Решение о продолжении испытания во 2-м под-шаге ветки «Да» (Fcmax)."""
-        self._continue_yes = cont
-        self._yes_dest = None   # сброс выбранного шага продолжения
-        self._render_step(self._current)
-
-    def _choose_yes_dest(self, target):
-        """Выбор шага продолжения (9 / 4 / 1) во 2-м под-шаге ветки «Да»."""
-        self._yes_dest = target
-        self._render_step(self._current)
 
     # ── контент шага «Стабилизация» (полный, как на мокапе) ────────────────
     def _render_stabilization(self, decision: bool = True, banner: bool = True, inputs: bool = True):
@@ -2088,6 +1194,9 @@ class _CyclicWizard(QWidget):
         l.setWordWrap(True)
         l.setStyleSheet(f"color: {_WZ['muted']}; font-size: 11px; background: transparent;")
         e = QLineEdit(value)
+        # маленькая мин. ширина — чтобы ряд из нескольких полей ужимался под
+        # ширину панели и не вылезал за правый край
+        e.setMinimumWidth(40)
         # пройденный (не текущий) шаг открыт только для просмотра — править нельзя
         e.setReadOnly(self._previewing)
         if on_change is not None:
