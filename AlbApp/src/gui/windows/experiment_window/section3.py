@@ -70,18 +70,6 @@ class _StripedOverlay(QWidget):
 #   "protocol" — кнопка "Сформировать Протокол" с растяжкой сверху
 #                  (всегда добавляется последней в процедуре)
 
-# Шаги которые прерываются аварией и красятся красным: (гост, методика) -> {индекс}
-ALARM_INTERRUPT_STEPS: dict[tuple, set[int]] = {
-    ("Р ИСО 10328-2021", "16.2.2"):    {3},   # шаг 4
-    ("Р ИСО 10328-2021", "16.2.2+С"):  {3},
-    ("Р ИСО 10328-2021", "16.2.1"):    {2},   # шаг 3
-    ("Р ИСО 10328-2021", "13.2.1.2"):  {3},   # шаг 4
-    ("Р53868-2021",       "16.2.2"):    {3},
-    ("Р53868-2021",       "16.2.2+С"):  {3},
-    ("Р53868-2021",       "16.2.1"):    {2},
-    ("Р53868-2021",       "13.2.1.2"):  {3},
-}
-
 PROCEDURES: dict[tuple, list[dict]] = {
 
     # ── ГОСТ Р ИСО 10328-2021, методика 16.2.2 ──────────────────────────────
@@ -1260,16 +1248,9 @@ class Section3Widget(QWidget):
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         root.addWidget(self._scroll, 1)
 
-        # Кнопка Начать / Сбросить внизу секции
-        self._btn_start = QPushButton("▶ Начать испытание")
-        self._btn_start.setMinimumHeight(36)
-        self._btn_start.clicked.connect(self._toggle_start)
-        root.addWidget(self._btn_start)
-
-        self._running = False
         self._gost    = ""
         self._method  = ""
-        self._wizard  = None   # _CyclicWizard в режиме 17.4.5, иначе None
+        self._wizard  = None
         self._rebuild()
 
     def set_params(self, gost: str, method: str):
@@ -1295,130 +1276,12 @@ class Section3Widget(QWidget):
         self._wizard = _CyclicWizard(self._gost, self._method, start_index=start_index)
         self._wizard.started.connect(self.started)   # проброс блокировки комбобоксов сек.2
         self._scroll.setWidget(self._wizard)
-        self._btn_start.hide()
-        # нейтрализуем состояние списочного режима, чтобы on_alarm/_toggle_start были безопасны
-        self._running   = False
-        self._executing = False
-        self._completed = False
-        self._step_buttons = []
-        self._step_bars    = []
-        self._alarm_steps      = set()
-        self._alarm_interrupts = set()
-
-    def _get_step_labels(self, steps: list) -> list:
-        """Собирает метки для 5 шагов из процедуры."""
-        labels = []
-        for step in steps:
-            t = step["type"]
-            if t == "f0row":
-                labels.append("F=0")
-            elif t == "step":
-                labels.append(step["btn"])
-            elif t == "button":
-                labels.append(step["text"])
-            elif t == "protocol":
-                labels.append("Сформировать протокол")
-        # Дополняем до 5 если меньше, обрезаем если больше
-        while len(labels) < 5:
-            labels.append(f"Шаг {len(labels)+1}")
-        return labels[:5]
-
-    _STYLE_WAITING  = "QPushButton { background: #2980b9; color: white; font-weight: bold; min-height: 36px; }"
-    _STYLE_DONE     = "QPushButton { background: #27ae60; color: white; font-weight: bold; min-height: 36px; }"
-    _STYLE_ALARM    = "QPushButton { background: #c0392b; color: white; font-weight: bold; min-height: 36px; }"
-    _STYLE_INACTIVE = "QPushButton { min-height: 36px; }"
 
     def on_alarm(self):
-        """Вызывается при аварии — прерывает нужный шаг и красит красным."""
-        if self._wizard is not None:
-            return  # в режиме мастера авария обрабатывается иначе
-        if not self._executing or not self._running:
-            return
-        step = self._current_step
-        if step in self._alarm_interrupts:
-            self._step_timer.stop()
-            self._executing = False
-            self._alarm_steps.add(step)
-            self._update_buttons()
-
-    def _toggle_start(self):
-        if self._wizard is not None:
-            return  # в режиме мастера кнопка скрыта
-        self._running = not self._running
-        self._executing = False
-        self._completed = False
-        self._alarm_steps.clear()
-        self._step_timer.stop()
-        if self._running:
-            self._btn_start.setText("⏹ Сбросить испытание")
-            self._current_step = 0
-        else:
-            self._btn_start.setText("▶ Начать испытание")
-        self.started.emit(self._running)
-        self._update_buttons()
-
-    def _update_buttons(self):
-        for i, (btn, bar) in enumerate(zip(self._step_buttons, self._step_bars)):
-            try:
-                btn.clicked.disconnect()
-            except (RuntimeError, TypeError):
-                pass
-            bar.stop()
-
-            if i in self._alarm_steps:
-                bar.stop()
-                btn.setStyleSheet(self._STYLE_ALARM)
-                btn.setEnabled(False)
-                continue
-
-            if self._completed:
-                btn.setStyleSheet(self._STYLE_DONE)
-                btn.setEnabled(False)
-                continue
-
-            if not self._running:
-                btn.setStyleSheet(self._STYLE_INACTIVE)
-                btn.setEnabled(False)
-            elif i < self._current_step:
-                btn.setStyleSheet(self._STYLE_DONE)
-                btn.setEnabled(False)
-            elif i == self._current_step and not self._executing:
-                btn.setStyleSheet(self._STYLE_WAITING)
-                btn.setEnabled(True)
-                btn.clicked.connect(self._start_step)
-                self._scroll.ensureWidgetVisible(btn)
-            elif i == self._current_step and self._executing:
-                btn.setStyleSheet(self._STYLE_WAITING)
-                btn.setEnabled(False)
-                bar.start()
-                self._scroll.ensureWidgetVisible(btn)
-            else:
-                btn.setStyleSheet(self._STYLE_INACTIVE)
-                btn.setEnabled(False)
-
-    def _start_step(self):
-        """Пользователь нажал кнопку шага — запускаем выполнение."""
-        self._executing = True
-        self._update_buttons()
-        if self._current_step in self._alarm_interrupts:
-            self._step_timer.start(10_000)
-        else:
-            self._on_step_timeout()
-
-    def _on_step_timeout(self):
-        """10 сек истекло — шаг выполнен, переходим к следующему или завершаем."""
-        self._executing = False
-        if self._current_step < len(self._step_buttons) - 1:
-            self._current_step += 1
-            self._update_buttons()
-        else:
-            # Последний шаг — все зелёные, параметры разблокированы
-            self._current_step = len(self._step_buttons)
-            self._running = False
-            self._completed = True
-            self._update_buttons()
-            self._btn_start.setText("▶ Начать испытание")
-            self.started.emit(False)
+        """Слот сигнала аварии (alarm_test). Прерывание в режиме мастера
+        выполняется пользователем через кнопку «Прервать» внутри визарда —
+        здесь обработки нет, метод сохранён только для подключения сигнала."""
+        return
 
 
 def _make_section3() -> Section3Widget:

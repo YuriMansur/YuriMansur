@@ -6,6 +6,13 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Виртуальные окружения
+.venv/
+venv/
+
+# Настройки IDE (в т.ч. машинно-зависимые)
+.vscode/
+
 # PyInstaller
 *.spec
 build/

@@ -10,9 +10,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QDateTime, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
-from protocol_backend.event_bus import bus
+from event_bus import bus
 from upgradable_qt_widgets.button import OpcUaButton, ButtonMode
-from database.influx_logger import InfluxLogger
 
 
 class Log(QTextEdit):
@@ -101,12 +100,17 @@ class ProtocolManagerWidget(QWidget):
             btn.setMinimumHeight(36)
             btn.set_online(False)
 
-        # кнопки → bus (команды)
-        self.btn_control_mode.state_changed.connect(bus.cmd_control_mode)
-        self.btn_forward      .state_changed.connect(bus.cmd_forward)
-        self.btn_backward     .state_changed.connect(bus.cmd_backward)
-        self.btn_power_on     .state_changed.connect(bus.cmd_power_on)
-        self.btn_power_off    .state_changed.connect(bus.cmd_power_off)
+        # имя тега ↔ кнопка (привязка к конкретным тегам — здесь, локально)
+        self._tag_buttons = {
+            'cmdChangeControlMode': self.btn_control_mode,
+            'cmdForwardJogging':    self.btn_forward,
+            'cmdBackwardJogging':   self.btn_backward,
+            'cmdPowerOn':           self.btn_power_on,
+            'cmdPowerOff':          self.btn_power_off,
+        }
+        # кнопки → bus.command (по имени тега; worker сам резолвит в NodeId)
+        for name, btn in self._tag_buttons.items():
+            btn.state_changed.connect(lambda v, n=name: bus.command.emit(n, v))
 
         grid = QGridLayout()
         grid.setSpacing(6)
@@ -163,15 +167,17 @@ class ProtocolManagerWidget(QWidget):
         bus.write_completed    .connect(lambda srv, nid, ok: self.log.write(f"[{srv}] запись {nid.split('.')[-1]} {'ок' if ok else 'ошибка'}", "#2ecc71" if ok else "#e74c3c"))
         bus.data_updated       .connect(lambda srv, nid, val: self.log.write(f"[{srv}] {nid} = {val}", "#aaaaaa") if self._log_data else None)
 
-        # массив тензодатчиков
-        bus.tenza_array_updated.connect(self._on_tenza_updated)
+        # массив тензодатчиков (поток "tenza_array")
+        bus.stream_array.connect(
+            lambda name, data: self._on_tenza_updated(data) if name == 'tenza_array' else None)
 
-        # состояния кнопок от PLC
-        bus.state_control_mode .connect(self.btn_control_mode.set_active)
-        bus.state_forward      .connect(self.btn_forward     .set_active)
-        bus.state_backward     .connect(self.btn_backward    .set_active)
-        bus.state_power_on     .connect(self.btn_power_on    .set_active)
-        bus.state_power_off    .connect(self.btn_power_off   .set_active)
+        # состояния кнопок от PLC — по имени тега
+        bus.tag_state.connect(self._on_tag_state)
+
+    def _on_tag_state(self, name: str, val):
+        btn = self._tag_buttons.get(name)
+        if btn:
+            btn.set_active(bool(val))
 
     def _on_connected(self, srv: str):
         self.lbl_connected.setText("● Подключен")

@@ -12,7 +12,7 @@ from PyQt6.QtCore import Qt, QDateTime, QTimer  # флаги Qt, работа с
 from PyQt6.QtGui import QShortcut, QKeySequence, QAction, QColor  # горячие клавиши, пункты меню, цвет
 import pyqtgraph as pg                          # графическая библиотека (PlotWidget, InfiniteLine и др.)
 pg.setConfigOptions(antialias=True, useOpenGL=True)
-from protocol_backend.event_bus import bus      # шина событий: получение точек от TenzaProcessor
+from event_bus import bus      # шина событий: получение точек от worker'а
 
 # ── локальные модули ──────────────────────────────────────────────────────────
 from ._archive_worker import (
@@ -366,15 +366,16 @@ class TrendsWiget(QWidget):
             self._channels[ch_id]['row'] = row
             ch_outer.addWidget(row)
 
-        # статическая привязка каналов
+        # статическая привязка каналов к именам потоков (источник — bus.stream_points)
         # порядок combo: 0=не привязан, 1=Датчик нагружения, 2=Датчик перемещения, 3=Текущая уставка нагружения
         _static = [
-            (1, 3, bus.nowSetpoint_points),    # Текущая уставка нагружения
-            (2, 1, bus.tenza_points),           # Датчик нагружения
-            (3, 2, bus.displacement_points),    # Датчик перемещения
+            (1, 3, 'setpoint'),       # Текущая уставка нагружения
+            (2, 1, 'tenza'),          # Датчик нагружения
+            (3, 2, 'displacement'),   # Датчик перемещения
         ]
-        for ch_id, _, signal in _static:
-            self._channels[ch_id]['signal'] = signal
+        for ch_id, _, stream in _static:
+            self._channels[ch_id]['signal'] = bus.stream_points
+            self._channels[ch_id]['stream'] = stream
         self._channels[1]['hold'] = True   # уставка тянется непрерывно до now
         self._channels[1]['curve'].setClipToView(False)  # hold-канал рисует шаг-функцию вручную
 
@@ -407,6 +408,7 @@ class TrendsWiget(QWidget):
             'hold':         False,  # True → линия продлевается до now на каждом кадре
             'last_val':     None,   # последнее полученное значение (для hold-режима)
             'signal':       None,
+            'stream':       None,   # имя потока в bus.stream_points (фильтр в слоте)
             'slot':         None,   # сохранённая ссылка на lambda-слот для отключения
             'row':          None,
             'color_btn':    None,
@@ -616,8 +618,9 @@ class TrendsWiget(QWidget):
         """Подключить сигнал канала (если привязан и ещё не подключён)."""
         if ch['signal'] is None or ch['slot'] is not None:
             return
-        def slot(times, values, _cid=ch_id):
-            self._push_points(_cid, times, values)
+        def slot(name, times, values, _cid=ch_id, _stream=ch['stream']):
+            if name == _stream:
+                self._push_points(_cid, times, values)
         ch['slot'] = slot
         # QueuedConnection обязателен: сигналы летят из _db_thread,
         # а кольцевой буфер читается из главного потока в _render_frame.

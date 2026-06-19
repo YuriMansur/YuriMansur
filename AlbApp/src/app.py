@@ -38,6 +38,7 @@ if __name__ == "__main__":
     # Мост: дренирует live_q → bus-сигналы; bus.cmd_* → cmd_q
     bridge = IpcBridge(live_q, cmd_q, parent=app)
 
+    app.aboutToQuit.connect(bridge.stop)
     app.aboutToQuit.connect(worker.terminate)
 
     window = UiApp()
