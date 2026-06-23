@@ -4,6 +4,11 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Базы данных (журнал испытаний, системный лог) — не коммитим
+*.db
+*.db-wal
+*.db-shm
+
 # VSCode (личные настройки — не коммитим, launch.json — коммитим)
 .vscode/settings.json
 
@@ -23,3 +28,6 @@ Thumbs.db
 influxdb/
 
 docs/
+# Сгенерированные протоколы
+protocols/out/
+documents/

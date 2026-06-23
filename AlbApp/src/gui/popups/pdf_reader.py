@@ -13,7 +13,7 @@ try:
 except ImportError:
     _FITZ_OK = False
 
-_DOCS_DIR = Path(__file__).parent.parent / "docs"
+_DOCS_DIR = Path(__file__).parent.parent.parent.parent / "docs"
 
 
 class _PageLabel(QLabel):

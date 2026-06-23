@@ -1,0 +1,40 @@
+{
+  "Р53868-2021": {
+    "P1": {
+      "I": {
+        "Fstab": "50",
+        "Fset": null,
+        "Fsp": null,
+        "F_su_lower_level": "100",
+        "F_su_upper_level": "1202"
+      }
+    }
+  },
+  "Р ИСО 10328-2021": {
+    "P8": {
+      "I": {
+        "Fstab": "3423",
+        "Fset": null,
+        "Fsp": null,
+        "F_su_lower_level": null,
+        "F_su_upper_level": null
+      }
+    },
+    "P6": {
+      "I": {
+        "Fstab": null,
+        "Fset": null,
+        "Fsp": null,
+        "F_su_lower_level": null,
+        "F_su_upper_level": null
+      }
+    }
+  },
+  "stand_info": {
+    "stand_model": "Стенд линейных испытаний",
+    "stand_serial": "",
+    "stand_date": "",
+    "si1_model": "",
+    "si2_model": ""
+  }
+}

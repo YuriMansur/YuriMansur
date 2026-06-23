@@ -3,6 +3,7 @@ from PyQt6.QtCore import QTimer
 from gui.windows.experiment_window.ui_experiment_wiget import ExperimentWidget
 from gui.windows.trengs_window.trends_wiget import TrendsWiget
 from gui.windows.settings_window.ui_settings_wiget import SettingsWidget
+from gui.windows.messages_window.messages_viewer import MessagesWidget
 from gui.style_classes.nav_button import NavigationButton
 
 
@@ -87,6 +88,7 @@ class MainWindow(QMainWindow):
         page_data = [
             ("🧪 Испытания", "#1abc9c"),
             ("📈 Тренды", "#3498db"),
+            ("💬 Сообщения", "#e67e22"),
             ("⚙️ Настройки", "#9b59b6"),
         ]
 
@@ -114,6 +116,30 @@ class MainWindow(QMainWindow):
         # Тогл светлой/тёмной темы справа
         from PyQt6.QtWidgets import QPushButton
         self._dark_mode = True
+
+        self._btn_export_nav = QPushButton("📤 Экспорт")
+        self._btn_export_nav.setFixedHeight(36)
+        self._btn_export_nav.setToolTip("Экспорт")
+        self._btn_export_nav.setStyleSheet(
+            "QPushButton { background: #1abc9c; color: #10141a; font-weight: bold;"
+            " border-radius: 4px; padding: 0 12px; }"
+            "QPushButton:hover { background: #16a085; }"
+        )
+        self._btn_export_nav.clicked.connect(self._open_export)
+        nav_layout.addWidget(self._btn_export_nav)
+        nav_layout.addSpacing(8)
+
+        self._btn_protocols_nav = QPushButton("📄 Протоколы")
+        self._btn_protocols_nav.setFixedHeight(36)
+        self._btn_protocols_nav.setToolTip("Протоколы испытаний")
+        self._btn_protocols_nav.setStyleSheet(
+            "QPushButton { background: #3498db; color: white; font-weight: bold;"
+            " border-radius: 4px; padding: 0 12px; }"
+            "QPushButton:hover { background: #5dade2; }"
+        )
+        self._btn_protocols_nav.clicked.connect(self._open_protocols)
+        nav_layout.addWidget(self._btn_protocols_nav)
+        nav_layout.addSpacing(8)
 
         self._btn_alarm_nav = QPushButton("⚠ Тест аварии")
         self._btn_alarm_nav.setFixedHeight(36)
@@ -143,20 +169,28 @@ class MainWindow(QMainWindow):
         # Страница 2: Тренды
         page2 = TrendsWiget()
         page2.setObjectName("trends_page")
-        
-        # Страница 3: Настройки
+
+        # Страница 3: Сообщения (системный лог)
+        page_msg = MessagesWidget()
+        page_msg.setObjectName("messages_page")
+
+        # Страница 4: Настройки
         self.settings_widget = SettingsWidget()
         page3 = self.settings_widget
         page3.setObjectName("settings_page")
-    
-        # Добавляем страницы в контейнер
+
+        # Добавляем страницы в контейнер (порядок = порядок вкладок навигации)
         self.stacked_widget.addWidget(page1)
         self.stacked_widget.addWidget(page2)
+        self.stacked_widget.addWidget(page_msg)
         self.stacked_widget.addWidget(page3)
 
         page1.alarm_test.connect(self._start_alarm_blink)
         page1.alarm_reset.connect(self._stop_alarm_blink)
         self._btn_alarm_nav.clicked.connect(page1.alarm_test)
+
+        # «Записать» в настройках (F-параметры/стенд) → секция 2 перечитывает данные
+        self.settings_widget.f_parameters_wiget.saved.connect(page1._sec2.reload_params)
 
         from gui.windows.experiment_window.section1 import _CameraWidget
         cam_settings = self.settings_widget.cameras_widget
@@ -178,6 +212,39 @@ class MainWindow(QMainWindow):
             cam.recording_changed.connect(cam_settings.set_recording)
             cam.cameras_found.connect(_on_cam_found)
             cam.capabilities_found.connect(lambda res, fps, idx=i: cam_settings.set_capabilities(idx, res, fps))
+
+    def _open_export(self):
+        """Открыть просмотрщик журнала в немодальном окне (как «Документация»)."""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout
+        from gui.popups.export_viewer import ExportViewer
+        dlg = getattr(self, "_export_dlg", None)
+        if dlg is not None and dlg.isVisible():
+            self._export_view.reload()      # обновить при повторном открытии
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Экспорт")
+        dlg.setModal(False)
+        dlg.resize(1000, 640)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._export_view = ExportViewer()
+        lay.addWidget(self._export_view)
+        self._export_dlg = dlg
+        dlg.show()
+
+    def _open_protocols(self):
+        """Открыть папку documents/ в проводнике (docx в программе не открываем)."""
+        import os
+        from pathlib import Path
+        from PyQt6.QtWidgets import QMessageBox
+        docs = Path(__file__).resolve().parent.parent.parent.parent / "documents"
+        docs.mkdir(parents=True, exist_ok=True)
+        try:
+            os.startfile(str(docs))
+        except OSError as e:
+            QMessageBox.warning(self, "Документы", f"Не удалось открыть папку:\n{e}")
 
     def _start_alarm_blink(self):
         if hasattr(self, "_blink_timer") and self._blink_timer.isActive():

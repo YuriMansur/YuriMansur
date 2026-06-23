@@ -1,0 +1,25 @@
+{
+  "albapp_root": "../AlbApp",
+  "targets": {
+    "servers.json": "patch/servers.json",
+    "gost_config.json": "patch/gost_config.json",
+    "params.json": "configs/params.json",
+    "methodics": "patch"
+  },
+  "stands": [
+    {"name": "Стенд 1.1", "dir": "stand_1_1", "group": "Группа 1"},
+    {"name": "Стенд 1.2", "dir": "stand_1_2", "group": "Группа 1"},
+    {"name": "Стенд 2.1", "dir": "stand_2_1", "group": "Группа 2"},
+    {"name": "Стенд 2.2", "dir": "stand_2_2", "group": "Группа 2"},
+    {"name": "Стенд 3.1", "dir": "stand_3_1", "group": "Группа 3"},
+    {"name": "Стенд 3.2", "dir": "stand_3_2", "group": "Группа 3"},
+    {"name": "Стенд 4.1", "dir": "stand_4_1", "group": "Группа 4"},
+    {"name": "Стенд 4.2", "dir": "stand_4_2", "group": "Группа 4"},
+    {"name": "Стенд 5.1", "dir": "stand_5_1", "group": "Группа 5"},
+    {"name": "Стенд 5.2", "dir": "stand_5_2", "group": "Группа 5"},
+    {"name": "Стенд 6.1", "dir": "stand_6_1", "group": "Группа 6"},
+    {"name": "Стенд 6.2", "dir": "stand_6_2", "group": "Группа 6"},
+    {"name": "Стенд 7.1", "dir": "stand_7_1", "group": "Группа 7"},
+    {"name": "Стенд 7.2", "dir": "stand_7_2", "group": "Группа 7"}
+  ]
+}

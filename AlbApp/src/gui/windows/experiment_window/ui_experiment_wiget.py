@@ -22,8 +22,10 @@ class ExperimentWidget(QWidget):
 
         sec2 = Section2Widget()
         sec3 = Section3Widget()
+        self._sec2 = sec2
         self._sec3 = sec3
         sec2.params_changed.connect(sec3.set_params)
+        sec3.set_sample_info_provider(sec2.sample_info)   # «инфо об образце» → протокол
         sec3.set_params(sec2.cb_std.currentText(), sec2.cb_method.currentText())
 
         def _on_started(running: bool):
@@ -133,4 +135,7 @@ class ExperimentWidget(QWidget):
                 pw.getPlotItem().titleLabel.text,
                 color=title_color, size="10pt"
             )
+        # окошки текущих значений под графиками — под текущую тему
+        from gui.windows.experiment_window.section4 import style_value_boxes
+        style_value_boxes(getattr(self, "_sec4_plots", []), dark)
 

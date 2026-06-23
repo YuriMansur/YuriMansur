@@ -9,47 +9,23 @@ from PyQt6.QtWidgets import (
     QLabel,
     QFrame,
 )
+from PyQt6.QtCore import pyqtSignal
 
 _SECTION_STYLE = "QFrame#section { border: 1px solid #555555; border-radius: 4px; }"
 
 _TITLE_STYLE = "font-size: 15px; font-weight: bold; color: #9b59b6;"
-import json
 
-# Все поля формы — порядок определяет порядок отображения
-FIELDS = ["Fstab", "Fset", "Fsp", "F_su_lower_level", "F_su_upper_level"]
+import param_config
 
-# Настройки для каждого ГОСТа:
-#   items  — список методик в combo_p
-#   i_ii   — нужен ли выбор нагружения I/II (False для А-режимов)
-#   fields — какие поля формы показывать для этого ГОСТа
-STAND_FIELDS = [
-    ("Марка и модель стенда:",  "stand_model"),
-    ("Серийный номер стенда:",  "stand_serial"),
-    ("Дата аттестации стенда:", "stand_date"),
-    ("Марка и модель СИ 1:",   "si1_model"),
-    ("Марка и модель СИ 2:",   "si2_model"),
-]
-
-GOST_OPTIONS = {
-    "Р53868-2021": {
-        "items": ["P1", "P2"],
-        "i_ii": True,
-        "fields": ["Fstab", "F_su_lower_level", "F_su_upper_level"],
-    },
-    "Р ИСО 10328-2021": {
-        "items": ["P3", "P4", "P5", "P6", "P7", "P8"],
-        "i_ii": True,
-        "fields": ["Fstab", "Fset", "Fsp", "F_su_lower_level", "F_su_upper_level"],
-    },
-    "Р ИСО 15032-2001": {
-        "items": ["A60", "A80", "A100"],
-        "i_ii": False,
-        "fields": ["Fstab", "Fset", "Fsp", "F_su_lower_level", "F_su_upper_level"],
-    },
-}
+# Структура параметров (ГОСТы, уровни, условия, поля сил, поля стенда)
+# вынесена в gost_config.json и читается через движок param_config.
+FIELDS = param_config.f_fields()         # порядок определяет порядок отображения
+STAND_FIELDS = param_config.stand_fields()
 
 
 class FWindow(QWidget):
+    saved = pyqtSignal()   # «Записать» нажата — параметры в файле обновлены
+
     def __init__(self):
         super().__init__()
         self.setMinimumSize(400, 300)
@@ -74,7 +50,7 @@ class FWindow(QWidget):
         content_layout.addWidget(lbl_params)
 
         self.combo_gost = QComboBox()
-        self.combo_gost.addItems(GOST_OPTIONS.keys())
+        self.combo_gost.addItems(param_config.gosts())
 
         self.combo_p = QComboBox()
 
@@ -124,7 +100,6 @@ class FWindow(QWidget):
         for label, key in STAND_FIELDS:
             inp = QLineEdit()
             self.stand_inputs[key] = inp
-            lbl = self.stand_form.labelForField(inp) if False else None
             self.stand_form.addRow(label, inp)
             lbl_widget = self.stand_form.labelForField(inp)
             if lbl_widget:
@@ -150,13 +125,13 @@ class FWindow(QWidget):
         self._load_stand_info()
 
     def _fill_combo_p(self, gost):
-        # Заполняет combo_p и combo_I_II исходя из выбранного ГОСТа
-        opts = GOST_OPTIONS.get(gost, {})
+        # Заполняет combo_p (уровни) и combo_I_II (условия) исходя из ГОСТа
         self.combo_p.clear()
         self.combo_I_II.clear()
-        self.combo_p.addItems(opts.get("items", []))
-        if opts.get("i_ii"):
-            self.combo_I_II.addItems(["I", "II"])
+        self.combo_p.addItems(param_config.load_levels(gost))
+        conds = param_config.conditions(gost)
+        if conds:
+            self.combo_I_II.addItems(conds)
             self.combo_I_II.show()
         else:
             self.combo_I_II.hide()
@@ -175,17 +150,13 @@ class FWindow(QWidget):
         gost = self.combo_gost.currentText()
         p    = self.combo_p.currentText()
         i_ii = self.combo_I_II.currentText()
-        data = self._read_file()
-        try:
-            return data[gost][p][i_ii] if i_ii else data[gost][p]
-        except KeyError:
-            return None
+        return param_config.values(gost, p, i_ii)
 
     def update_fields(self):
         # Обновляет видимость и значения полей формы
-        # Показывает только поля из GOST_OPTIONS[gost]["fields"]
+        # Показывает только поля из gost_config.json (fields данного ГОСТа)
         gost = self.combo_gost.currentText()
-        visible = GOST_OPTIONS[gost]["fields"]
+        visible = param_config.fields(gost)
         values = self._get_values()
 
         for name, inp in self.inputs.items():
@@ -198,12 +169,8 @@ class FWindow(QWidget):
             inp.setText(str(val) if val is not None else "")
 
     def _read_file(self):
-        # Читает params.json, возвращает пустой dict если файл не найден
-        try:
-            with open("params.json", "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
+        # Читает params.json через движок (пустой dict если файла нет)
+        return param_config.read_params()
 
     def save_params(self):
         # Сохраняет текущие значения полей в params.json
@@ -222,8 +189,8 @@ class FWindow(QWidget):
         else:
             data[gost][p] = fields
 
-        with open("params.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        param_config.write_params(data)
+        self.saved.emit()
 
     def _load_stand_info(self):
         data = self._read_file().get("stand_info", {})
@@ -233,8 +200,8 @@ class FWindow(QWidget):
     def save_stand_info(self):
         data = self._read_file()
         data["stand_info"] = {key: inp.text() for key, inp in self.stand_inputs.items()}
-        with open("params.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        param_config.write_params(data)
+        self.saved.emit()
 
     def set_theme(self, dark: bool):
         text   = "#ecf0f1" if dark else "#1a1a1a"

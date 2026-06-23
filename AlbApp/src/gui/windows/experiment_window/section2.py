@@ -4,15 +4,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QDateTime, pyqtSignal
 
-from gui.windows.settings_window.F_parameters import GOST_OPTIONS
-
-_ISO_10328_METHODS = ["6.4.4","16.3","17.4.5"]
-
-METHOD_OPTIONS = {
-    "Р53868-2021":       _ISO_10328_METHODS,
-    "Р ИСО 10328-2021":  _ISO_10328_METHODS,
-    "Р ИСО 15032-2001":  [],
-}
+import param_config
 
 _TITLE_STYLE = "font-size: 15px; font-weight: bold; color: #1abc9c;"
 
@@ -52,7 +44,7 @@ class Section2Widget(QWidget):
 
         def _open_pdf():
             from PyQt6.QtWidgets import QVBoxLayout
-            from pdf_reader import PdfReaderWidget
+            from gui.popups.pdf_reader import PdfReaderWidget
             # убираем уже закрытые окна
             btn_docs._pdf_windows = [w for w in btn_docs._pdf_windows if w.isVisible()]
             max_windows = len(list(_DOCS_DIR.glob("*.pdf"))) if _DOCS_DIR.exists() else 1
@@ -84,24 +76,15 @@ class Section2Widget(QWidget):
         grp_stand.setSpacing(5)
         layout.addLayout(grp_stand)
 
-        try:
-            import json as _json
-            with open("params.json", "r", encoding="utf-8") as _f:
-                _si = _json.load(_f).get("stand_info", {})
-        except (FileNotFoundError, ValueError):
-            _si = {}
+        _si = param_config.stand_info()
 
-        for label, key in [
-            ("Марка и модель стенда:",  "stand_model"),
-            ("Серийный номер стенда:",  "stand_serial"),
-            ("Дата аттестации стенда:", "stand_date"),
-            ("Марка и модель СИ 1:",    "si1_model"),
-            ("Марка и модель СИ 2:",    "si2_model"),
-        ]:
+        self._stand_labels = {}   # key → QLabel значения (для перечитывания)
+        for label, key in param_config.stand_fields():
             row = QHBoxLayout()
             row.setSpacing(10)
             lk = QLabel(label)
             lv = QLabel(_si.get(key, ""))
+            self._stand_labels[key] = lv
             row.addWidget(lk)
             row.addWidget(lv, 1)
             grp_stand.addLayout(row)
@@ -122,7 +105,7 @@ class Section2Widget(QWidget):
         form2.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.cb_std = QComboBox()
-        self.cb_std.addItems(GOST_OPTIONS.keys())
+        self.cb_std.addItems(param_config.gosts())
         form2.addRow("Стандарт проведения испытаний:", self.cb_std)
 
         self.cb_load = QComboBox()
@@ -130,11 +113,13 @@ class Section2Widget(QWidget):
 
         self.cb_cond = QComboBox()
         self._lbl_cond = QLabel("Условие нагружения:")
+        # резервируем место строки даже когда она скрыта — чтобы при ГОСТах
+        # без условия (I/II) ничего ниже не прыгало
         for w in (self.cb_cond, self._lbl_cond):
             sp = w.sizePolicy(); sp.setRetainSizeWhenHidden(True); w.setSizePolicy(sp)
         form2.addRow(self._lbl_cond, self.cb_cond)
 
-        _F_KEYS = ["Fset", "Fsp", "Fstab", "F_su_lower_level", "F_su_upper_level"]
+        _F_KEYS = param_config.f_fields()
         self._f_edits  = {}
         self._f_labels = {}
         for key in _F_KEYS:
@@ -164,23 +149,36 @@ class Section2Widget(QWidget):
         form1 = QFormLayout()
         form1.setSpacing(4)
         form1.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        # поля с Expanding-политикой растягиваются на ширину формы (Fusion по
+        # умолчанию держит поля на sizeHint — иначе строка ввода короткая)
+        form1.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        dt1 = QDateTimeEdit(QDateTime.currentDateTime())
-        dt1.setDisplayFormat("dd.MM.yyyy"); dt1.setCalendarPopup(True)
-        form1.addRow("Дата получения образца на:", dt1)
+        # каждая строка: метка над полем, поле — на всю ширину формы
+        def _full_row(label: str, widget):
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            form1.addRow(QLabel(label))
+            form1.addRow(widget)
 
-        dt2 = QDateTimeEdit(QDateTime.currentDateTime())
-        dt2.setDisplayFormat("dd.MM.yyyy"); dt2.setCalendarPopup(True)
-        form1.addRow("Дата проведения:", dt2)
+        self.le_sample_name = QLineEdit()
+        self.le_sample_name.setPlaceholderText("Введите название")
+        _full_row("Название образца:", self.le_sample_name)
 
-        cb_used = QComboBox(); cb_used.addItems(["Нет", "Да"])
-        form1.addRow("Образец используется:", cb_used)
+        self._dt1 = QDateTimeEdit(QDateTime.currentDateTime())
+        self._dt1.setDisplayFormat("dd.MM.yyyy"); self._dt1.setCalendarPopup(True)
+        _full_row("Дата получения образца на:", self._dt1)
 
-        cb_replace = QComboBox(); cb_replace.addItems(["Нет", "Да"])
-        form1.addRow("Образец используется взамен\nразрушенного:", cb_replace)
+        self._dt2 = QDateTimeEdit(QDateTime.currentDateTime())
+        self._dt2.setDisplayFormat("dd.MM.yyyy"); self._dt2.setCalendarPopup(True)
+        _full_row("Дата проведения:", self._dt2)
 
-        le_clamp = QLineEdit(); le_clamp.setPlaceholderText("Введите значение")
-        form1.addRow("Применяемые концевые крепления:", le_clamp)
+        self._cb_used = QComboBox(); self._cb_used.addItems(["Нет", "Да"])
+        _full_row("Образец используется:", self._cb_used)
+
+        self._cb_replace = QComboBox(); self._cb_replace.addItems(["Нет", "Да"])
+        _full_row("Образец используется взамен разрушенного:", self._cb_replace)
+
+        self._le_clamp = QLineEdit(); self._le_clamp.setPlaceholderText("Введите значение")
+        _full_row("Применяемые концевые крепления:", self._le_clamp)
 
         grp1.addLayout(form1)
 
@@ -197,47 +195,36 @@ class Section2Widget(QWidget):
         self._fill_load(self.cb_std.currentText())
 
     def _fill_load(self, gost: str):
-        opts = GOST_OPTIONS.get(gost, {})
-
         self.cb_load.blockSignals(True)
         self.cb_load.clear()
-        self.cb_load.addItems(opts.get("items", []))
+        self.cb_load.addItems(param_config.load_levels(gost))
         self.cb_load.blockSignals(False)
 
-        has_i_ii = bool(opts.get("i_ii"))
+        conds = param_config.conditions(gost)
+        has_cond = bool(conds)
         self.cb_cond.blockSignals(True)
         self.cb_cond.clear()
-        if has_i_ii:
-            self.cb_cond.addItems(["I", "II"])
-        _hide = "color: transparent; background: transparent; border-color: transparent;"
-        self.cb_cond.setStyleSheet("" if has_i_ii else _hide)
-        self.cb_cond.setEnabled(has_i_ii)
-        self._lbl_cond.setStyleSheet("" if has_i_ii else "color: transparent;")
+        if has_cond:
+            self.cb_cond.addItems(conds)
         self.cb_cond.blockSignals(False)
+        # нет условий у ГОСТа → виджеты скрыты, но место строки сохраняется
+        # (retainSizeWhenHidden) — блок остаётся жёстким, ничего не прыгает
+        self.cb_cond.setVisible(has_cond)
+        self._lbl_cond.setVisible(has_cond)
 
         self.cb_method.blockSignals(True)
         self.cb_method.clear()
-        self.cb_method.addItems(METHOD_OPTIONS.get(gost, []))
+        self.cb_method.addItems(param_config.methods(gost))
         self.cb_method.blockSignals(False)
 
         self._refresh_f()
 
     def _refresh_f(self):
-        import json as _j
-        try:
-            with open("params.json", "r", encoding="utf-8") as fh:
-                data = _j.load(fh)
-        except (FileNotFoundError, ValueError):
-            data = {}
         gost    = self.cb_std.currentText()
         p_key   = self.cb_load.currentText()
-        i_ii    = self.cb_cond.currentText()
-        opts    = GOST_OPTIONS.get(gost, {})
-        visible = opts.get("fields", [])
-        try:
-            vals = data[gost][p_key][i_ii] if opts.get("i_ii") else data[gost][p_key]
-        except KeyError:
-            vals = {}
+        i_ii    = self.cb_cond.currentText() if param_config.has_conditions(gost) else ""
+        visible = param_config.fields(gost)
+        vals    = param_config.values(gost, p_key, i_ii) or {}
         _hide = "color: transparent; background: transparent; border-color: transparent;"
         for key, le in self._f_edits.items():
             show = key in visible
@@ -252,5 +239,24 @@ class Section2Widget(QWidget):
 
     def _emit_params(self):
         self.params_changed.emit(self.cb_std.currentText(), self.cb_method.currentText())
+
+    def reload_params(self):
+        """Перечитать параметры из файла (после «Записать» в настройках):
+        сведения о стенде + значения сил для текущего выбора."""
+        si = param_config.stand_info()
+        for key, lbl in self._stand_labels.items():
+            lbl.setText(si.get(key, ""))
+        self._refresh_f()
+
+    def sample_info(self) -> dict:
+        """Данные блока «Информация об исследуемом образце» — для протокола."""
+        return {
+            "sample_name":      self.le_sample_name.text(),
+            "date_received":    self._dt1.dateTime().toString("dd.MM.yyyy"),
+            "date_conducted":   self._dt2.dateTime().toString("dd.MM.yyyy"),
+            "used":             self._cb_used.currentText(),
+            "used_replacement": self._cb_replace.currentText(),
+            "clamps":           self._le_clamp.text(),
+        }
 
 

@@ -1,0 +1,30 @@
+{
+  "f_fields": ["Fstab", "Fset", "Fsp", "F_su_lower_level", "F_su_upper_level"],
+  "stand_fields": [
+    {"key": "stand_model",  "label": "Марка и модель стенда:"},
+    {"key": "stand_serial", "label": "Серийный номер стенда:"},
+    {"key": "stand_date",   "label": "Дата аттестации стенда:"},
+    {"key": "si1_model",    "label": "Марка и модель СИ 1:"},
+    {"key": "si2_model",    "label": "Марка и модель СИ 2:"}
+  ],
+  "gosts": {
+    "Р53868-2021": {
+      "load_levels": ["P1", "P2"],
+      "conditions":  ["I", "II"],
+      "fields":      ["Fstab", "F_su_lower_level", "F_su_upper_level"],
+      "methods":     ["6.4.4", "16.3", "17.4.5"]
+    },
+    "Р ИСО 10328-2021": {
+      "load_levels": ["P3", "P4", "P5", "P6", "P7", "P8"],
+      "conditions":  ["I", "II"],
+      "fields":      ["Fstab", "Fset", "Fsp", "F_su_lower_level", "F_su_upper_level"],
+      "methods":     ["6.4.4", "16.3", "17.4.5"]
+    },
+    "Р ИСО 15032-2001": {
+      "load_levels": ["A60", "A80", "A100"],
+      "conditions":  [],
+      "fields":      ["Fstab", "Fset", "Fsp", "F_su_lower_level", "F_su_upper_level"],
+      "methods":     []
+    }
+  }
+}

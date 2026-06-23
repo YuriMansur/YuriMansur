@@ -19,7 +19,8 @@ from asyncua import Client, ua
 
 from worker_process.ring_buffer import RingProc
 
-_CONFIG_PATH = Path(__file__).parent / "servers.json"
+# servers.json подкладывается в AlbApp/patch (src/worker_process → AlbApp)
+_CONFIG_PATH = Path(__file__).parents[2] / "patch" / "servers.json"
 
 
 def _node_id(ns: int, path: str) -> str:

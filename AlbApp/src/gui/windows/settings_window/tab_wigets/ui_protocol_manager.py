@@ -11,7 +11,7 @@ from PyQt6.QtCore import QDateTime, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from event_bus import bus
-from upgradable_qt_widgets.button import OpcUaButton, ButtonMode
+from AlbApp.src.upgradable_qt_widgets.button import OpcUaButton, ButtonMode
 
 
 class Log(QTextEdit):

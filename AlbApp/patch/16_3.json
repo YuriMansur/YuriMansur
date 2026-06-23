@@ -1,0 +1,1045 @@
+{
+  "title": "Циклическое испытание замков коленных узлов",
+  "steps": [
+    {
+      "id": "setup",
+      "group": "ПОДГОТОВКА",
+      "title": "Установка образца",
+      "sub": "Оборудование / приспособление",
+      "kind": "form",
+      "body": [
+        {
+          "type": "banner",
+          "text": "Зарегистрировать уровень нагрузки, значения смещений и испытательных сил, числа циклов"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "load",
+              "label": "Уровень нагрузки (Н)"
+            },
+            {
+              "key": "disp",
+              "label": "Значения смещений (мм)"
+            }
+          ]
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "force",
+              "label": "Испытательные силы (Н)"
+            },
+            {
+              "key": "cycles",
+              "label": "Число циклов"
+            }
+          ]
+        },
+        {
+          "type": "fixture"
+        }
+      ]
+    },
+    {
+      "id": "params",
+      "group": "ПОДГОТОВКА",
+      "title": "Комбинация и значения установленных длин сегментов",
+      "sub": "F=0, длины сегментов",
+      "kind": "form",
+      "body": [
+        {
+          "type": "button",
+          "text": "Установить F = 0"
+        },
+        {
+          "type": "text",
+          "text": "Установить длины сегментов образца"
+        },
+        {
+          "type": "note",
+          "text": "Зарегистрировать комбинацию и значения установленных длин сегментов"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "combo",
+              "label": "Комбинация"
+            }
+          ]
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "seg1",
+              "label": "Длина сегмента 1 (мм)"
+            },
+            {
+              "key": "seg2",
+              "label": "Длина сегмента 2 (мм)"
+            },
+            {
+              "key": "seg3",
+              "label": "Длина сегмента 3 (мм)"
+            }
+          ]
+        },
+        {
+          "type": "fixture"
+        }
+      ]
+    },
+    {
+      "id": "disp",
+      "group": "ПОДГОТОВКА",
+      "title": "Смещения на нагрузочных рычагах",
+      "sub": "F=0, нижний и верхний рычаги",
+      "kind": "form",
+      "body": [
+        {
+          "type": "button",
+          "text": "Установить F = 0"
+        },
+        {
+          "type": "text",
+          "text": "Установить смещения на нижнем и верхнем нагрузочных рычагах"
+        },
+        {
+          "type": "note",
+          "text": "Записать первоначальные значения смещений"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "lower",
+              "label": "Нижний рычаг (мм)"
+            },
+            {
+              "key": "upper",
+              "label": "Верхний рычаг (мм)"
+            }
+          ]
+        },
+        {
+          "type": "fixture"
+        }
+      ]
+    },
+    {
+      "id": "stab4",
+      "group": "НАГРУЖЕНИЕ",
+      "title": "Стабилизирующая нагрузка",
+      "sub": "Fset = 800 Н, 20 с, F=0 12 мин",
+      "kind": "form",
+      "body": [
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "fset",
+              "label": "Fset (Н)",
+              "default": "800"
+            },
+            {
+              "key": "tload",
+              "label": "t нагрузки (с)",
+              "default": "20"
+            },
+            {
+              "key": "tunload",
+              "label": "t разгрузки (мин)",
+              "default": "12"
+            }
+          ]
+        },
+        {
+          "type": "cards",
+          "items": [
+            {
+              "value": "800 Н",
+              "caption": "F текущее",
+              "color": "green"
+            },
+            {
+              "value": "—",
+              "caption": "t прошло"
+            },
+            {
+              "value": "—",
+              "caption": "δ при Fset"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "adjust",
+      "group": "НАГРУЖЕНИЕ",
+      "title": "Регулировки",
+      "sub": "Fstab = 50 Н, приспособление",
+      "kind": "form",
+      "body": [
+        {
+          "type": "button",
+          "text": "Fstab = 50 Н"
+        },
+        {
+          "type": "text",
+          "text": "Выполнить регулировки"
+        },
+        {
+          "type": "note",
+          "text": "Записать окончательные значения смещений"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "lower",
+              "label": "Нижний рычаг (мм)"
+            },
+            {
+              "key": "upper",
+              "label": "Верхний рычаг (мм)"
+            }
+          ]
+        },
+        {
+          "type": "fixture"
+        }
+      ]
+    },
+    {
+      "id": "arms",
+      "group": "НАГРУЖЕНИЕ",
+      "title": "Действительные плечи рычагов",
+      "sub": "Fstab = 50 Н, δ11, плечи рычагов",
+      "kind": "form",
+      "body": [
+        {
+          "type": "button",
+          "text": "Fstab = 50 Н"
+        },
+        {
+          "type": "note",
+          "text": "Регистрация δ11"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "d11",
+              "label": "δ11 (мм)"
+            }
+          ]
+        },
+        {
+          "type": "note",
+          "text": "Измерить и записать действительные плечи рычагов"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "lower",
+              "label": "Нижний рычаг (мм)"
+            },
+            {
+              "key": "upper",
+              "label": "Верхний рычаг (мм)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "fcmax",
+      "group": "НАГРУЖЕНИЕ",
+      "title": "Fcmax",
+      "sub": "Fcmax, регистрация δ13",
+      "kind": "form",
+      "body": [
+        {
+          "type": "button",
+          "text": "Приложить Fcmax"
+        },
+        {
+          "type": "note",
+          "text": "Регистрация δ13"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "d13",
+              "label": "δ13 (мм)"
+            }
+          ]
+        },
+        {
+          "type": "note",
+          "text": "Измерить и записать смещения"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "disp_lower",
+              "label": "Нижний рычаг (мм)"
+            },
+            {
+              "key": "disp_upper",
+              "label": "Верхний рычаг (мм)"
+            }
+          ]
+        },
+        {
+          "type": "note",
+          "text": "Действительные плечи рычагов"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "arm_lower",
+              "label": "Нижний рычаг (мм)"
+            },
+            {
+              "key": "arm_upper",
+              "label": "Верхний рычаг (мм)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "fcmin",
+      "group": "НАГРУЖЕНИЕ",
+      "title": "Fcmin",
+      "sub": "Fcmin, контроль разрушения образца",
+      "kind": "form",
+      "body": [
+        {
+          "type": "button",
+          "text": "Приложить Fcmin"
+        }
+      ],
+      "decision": {
+        "question": "Разрушение образца?",
+        "options": [
+          {
+            "label": "✓ Да",
+            "value": "yes",
+            "goto": "protocol",
+            "interrupted": true,
+            "button": "📄 Сформировать протокол",
+            "reveal": [
+              {
+                "type": "note",
+                "text": "Регистрация F и t при разрушении"
+              },
+              {
+                "type": "fields",
+                "items": [
+                  {
+                    "key": "force",
+                    "label": "F при разрушении (Н)"
+                  },
+                  {
+                    "key": "time",
+                    "label": "t при разрушении (с)"
+                  }
+                ]
+              },
+              {
+                "type": "note",
+                "text": "Осмотр образца с указанием характера и места повреждения"
+              },
+              {
+                "type": "fields",
+                "items": [
+                  {
+                    "key": "inspect",
+                    "label": "Характер и место повреждения"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "✕ Нет",
+            "value": "no",
+            "goto": "next"
+          }
+        ]
+      }
+    },
+    {
+      "id": "cyclic",
+      "group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ",
+      "title": "Циклическое нагружение F-c(t)",
+      "sub": "F-c(t), частота, стабильные условия",
+      "kind": "form",
+      "body": [
+        {
+          "type": "button",
+          "text": "Запустить F-c(t)"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "freq",
+              "label": "Частота (Гц)"
+            }
+          ]
+        }
+      ],
+      "decision": {
+        "question": "Достигнуты стабильные условия?",
+        "options": [
+          {
+            "label": "✓ Да",
+            "value": "yes",
+            "goto": "next",
+            "reveal": [
+              {
+                "type": "text",
+                "text": "Остановка оборудования"
+              },
+              {
+                "type": "note",
+                "text": "Регистрация числа циклов для достижения стабильных условий"
+              },
+              {
+                "type": "fields",
+                "items": [
+                  {
+                    "key": "cycles",
+                    "label": "Число циклов"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "✕ Нет",
+            "value": "no",
+            "repeat": true,
+            "repeat_button": "🔁 Повторить цикл",
+            "reveal": [
+              {
+                "type": "banner",
+                "accent": "amber",
+                "text": "🔁  Стабильные условия не достигнуты — повторить цикл нагружения"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "onecycle",
+      "group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ",
+      "title": "Один цикл",
+      "sub": "Fcmax, δ13, Fcmin",
+      "kind": "form",
+      "body": [
+        {
+          "type": "button",
+          "text": "Приложить Fcmax"
+        },
+        {
+          "type": "note",
+          "text": "Регистрация δ13"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "d13",
+              "label": "δ13 (мм)"
+            }
+          ]
+        },
+        {
+          "type": "button",
+          "text": "Приложить Fcmin"
+        }
+      ]
+    },
+    {
+      "id": "cycles11",
+      "group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ",
+      "title": "Циклическое нагружение — счёт циклов",
+      "sub": "F-c(t), число циклов, останов",
+      "kind": "form",
+      "body": [
+        {
+          "type": "button",
+          "text": "Запустить F-c(t)"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "freq",
+              "label": "Частота (Гц)"
+            },
+            {
+              "key": "ncycles",
+              "label": "Число циклов",
+              "default": "1·10⁶"
+            }
+          ]
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "nreplace",
+              "label": "Число циклов до замены деталей"
+            }
+          ]
+        },
+        {
+          "type": "flag",
+          "key": "__stopped__",
+          "text": "⏹ Остановка оборудования",
+          "reveal": [
+            {
+              "type": "note",
+              "text": "Регистрация числа циклов"
+            },
+            {
+              "type": "fields",
+              "items": [
+                {
+                  "key": "nreg",
+                  "label": "Число циклов (зарегистрировано)"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "decision": {
+        "question": "Достигнуто число циклов?",
+        "options": [
+          {
+            "label": "✓ Да",
+            "value": "yes",
+            "goto": "next"
+          },
+          {
+            "label": "✕ Нет",
+            "value": "no",
+            "goto": "next"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fracture12",
+      "group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ",
+      "title": "Разрушение образца",
+      "sub": "Разрушение, частота, нагружение",
+      "kind": "form",
+      "decision": {
+        "question": "Разрушение образца?",
+        "options": [
+          {
+            "label": "✓ Да",
+            "value": "yes",
+            "decision": {
+              "question": "Частота < 3 Гц?",
+              "options": [
+                {
+                  "label": "✓ Да",
+                  "value": "y",
+                  "goto": "step14"
+                },
+                {
+                  "label": "✕ Нет",
+                  "value": "n",
+                  "goto": "setup",
+                  "arrow": true,
+                  "reveal": [
+                    {
+                      "type": "banner",
+                      "accent": "amber",
+                      "text": "🔁  Повторить испытание нового образца на частоте < 3 Гц"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "label": "✕ Нет",
+            "value": "no",
+            "goto": "next"
+          }
+        ]
+      }
+    },
+    {
+      "id": "step14",
+      "group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ",
+      "title": "Осмотр образца",
+      "sub": "Характер и место повреждения",
+      "kind": "form",
+      "body": [
+        {
+          "type": "note",
+          "text": "Осмотр образца с указанием характера и места повреждения"
+        },
+        {
+          "type": "fields",
+          "items": [
+            {
+              "key": "inspect",
+              "label": "Характер и место повреждения"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "passed13",
+      "group": "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ",
+      "title": "Образец выдержал испытание",
+      "sub": "Оценка результата испытания",
+      "kind": "form",
+      "decision": {
+        "question": "Образец выдержал испытание?",
+        "options": [
+          {
+            "label": "✓ Да",
+            "value": "yes",
+            "goto": "protocol",
+            "interrupted": true,
+            "set": {
+              "passed": true
+            }
+          },
+          {
+            "label": "✕ Нет",
+            "value": "no",
+            "goto": "protocol",
+            "interrupted": true,
+            "set": {
+              "passed": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "protocol",
+      "group": "ЗАВЕРШЕНИЕ",
+      "title": "Протокол",
+      "sub": "Экспорт результатов",
+      "kind": "protocol"
+    }
+  ],
+  "substeps": {
+    "cycles11_no": [
+      {
+        "id": "shutdown",
+        "indent": true,
+        "parent": "cycles11",
+        "kind": "form",
+        "title": "Регистрация отключения",
+        "sub": "Причина, продолжительность, осмотр",
+        "body": [
+          {
+            "type": "note",
+            "text": "Регистрация причины отключения"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "reason",
+                "label": "Причина отключения"
+              }
+            ]
+          },
+          {
+            "type": "note",
+            "text": "Регистрация продолжительности отключения (дата, время)"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "duration",
+                "label": "Продолжительность отключения (дата, время)"
+              }
+            ]
+          },
+          {
+            "type": "note",
+            "text": "Регистрация осмотра образца"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "inspect",
+                "label": "Осмотр образца"
+              }
+            ]
+          }
+        ],
+        "decision": {
+          "question": "Решение о продолжении испытания",
+          "options": [
+            {
+              "label": "✓ Продолжить",
+              "value": "yes",
+              "goto": "cyclic",
+              "arrow": true
+            },
+            {
+              "label": "✕ Не продолжать",
+              "value": "no",
+              "goto": "next"
+            }
+          ]
+        }
+      }
+    ],
+    "cycles11_yes": [
+      {
+        "id": "yes_fcmin",
+        "indent": true,
+        "parent": "cycles11",
+        "kind": "form",
+        "title": "Fcmin",
+        "sub": "δ, смещения, плечи рычагов",
+        "body": [
+          {
+            "type": "button",
+            "text": "Приложить Fcmin"
+          },
+          {
+            "type": "note",
+            "text": "Регистрация δ"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "d",
+                "label": "δ (мм)"
+              }
+            ]
+          },
+          {
+            "type": "note",
+            "text": "Измерить и записать смещения"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "disp_lower",
+                "label": "Нижний рычаг (мм)"
+              },
+              {
+                "key": "disp_upper",
+                "label": "Верхний рычаг (мм)"
+              }
+            ]
+          },
+          {
+            "type": "note",
+            "text": "Действительные плечи рычагов"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "arm_lower",
+                "label": "Нижний рычаг (мм)"
+              },
+              {
+                "key": "arm_upper",
+                "label": "Верхний рычаг (мм)"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "yes_fcmax",
+        "indent": true,
+        "parent": "cycles11",
+        "kind": "form",
+        "title": "Fcmax",
+        "sub": "δ, смещения, плечи рычагов",
+        "body": [
+          {
+            "type": "button",
+            "text": "Приложить Fcmax"
+          },
+          {
+            "type": "note",
+            "text": "Регистрация δ"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "d",
+                "label": "δ (мм)"
+              }
+            ]
+          },
+          {
+            "type": "note",
+            "text": "Измерить и записать смещения"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "disp_lower",
+                "label": "Нижний рычаг (мм)"
+              },
+              {
+                "key": "disp_upper",
+                "label": "Верхний рычаг (мм)"
+              }
+            ]
+          },
+          {
+            "type": "note",
+            "text": "Действительные плечи рычагов"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "arm_lower",
+                "label": "Нижний рычаг (мм)"
+              },
+              {
+                "key": "arm_upper",
+                "label": "Верхний рычаг (мм)"
+              }
+            ]
+          }
+        ],
+        "decision": {
+          "question": "Решение о продолжении испытания",
+          "options": [
+            {
+              "label": "✓ Продолжить",
+              "value": "yes",
+              "reveal": [
+                {
+                  "type": "text",
+                  "text": "Замена деталей"
+                },
+                {
+                  "type": "fields",
+                  "items": [
+                    {
+                      "key": "parts",
+                      "label": "Конкретные заменённые детали"
+                    }
+                  ]
+                }
+              ],
+              "decision": {
+                "question": "Продолжить с шага:",
+                "options": [
+                  {
+                    "label": "9",
+                    "value": "s9",
+                    "goto": "cyclic",
+                    "arrow": true
+                  },
+                  {
+                    "label": "4",
+                    "value": "s4",
+                    "goto": "stab4",
+                    "arrow": true
+                  },
+                  {
+                    "label": "1",
+                    "value": "s1",
+                    "goto": "setup",
+                    "arrow": true
+                  }
+                ]
+              }
+            },
+            {
+              "label": "✕ Не продолжать",
+              "value": "no",
+              "goto": "next"
+            }
+          ]
+        }
+      }
+    ],
+    "fracture12_no": [
+      {
+        "id": "fr_fcmin",
+        "indent": true,
+        "parent": "fracture12",
+        "kind": "form",
+        "title": "Fcmin",
+        "sub": "L/δ, плечи рычагов",
+        "body": [
+          {
+            "type": "button",
+            "text": "Приложить Fcmin"
+          },
+          {
+            "type": "note",
+            "text": "Регистрация L или δ"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "ld",
+                "label": "L или δ (мм)"
+              }
+            ]
+          },
+          {
+            "type": "note",
+            "text": "Измерить и записать действительные плечи рычагов"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "arm_lower",
+                "label": "Нижний рычаг (мм)"
+              },
+              {
+                "key": "arm_upper",
+                "label": "Верхний рычаг (мм)"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "fr_fcmax",
+        "indent": true,
+        "parent": "fracture12",
+        "kind": "form",
+        "title": "Fcmax",
+        "sub": "L/δ, плечи, перемещение",
+        "body": [
+          {
+            "type": "button",
+            "text": "Приложить Fcmax"
+          },
+          {
+            "type": "note",
+            "text": "Регистрация L или δ"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "ld",
+                "label": "L или δ (мм)"
+              }
+            ]
+          },
+          {
+            "type": "note",
+            "text": "Измерить и записать действительные плечи рычагов"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "arm_lower",
+                "label": "Нижний рычаг (мм)"
+              },
+              {
+                "key": "arm_upper",
+                "label": "Верхний рычаг (мм)"
+              }
+            ]
+          }
+        ],
+        "decision": {
+          "question": "Перемещение на 5 мм ниже L (или выше δ) при Fcmax относительно Fcmin?",
+          "options": [
+            {
+              "label": "✓ Да",
+              "value": "yes",
+              "goto": "next"
+            },
+            {
+              "label": "✕ Нет",
+              "value": "no",
+              "goto": "step14"
+            }
+          ]
+        }
+      }
+    ],
+    "fr_fcmax_yes": [
+      {
+        "id": "step13_load",
+        "indent": true,
+        "parent": "fr_fcmax",
+        "kind": "form",
+        "title": "Окончательное нагружение",
+        "sub": "Ffin, V, t, осмотр",
+        "body": [
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "ffin",
+                "label": "Ffin (Н)"
+              },
+              {
+                "key": "v",
+                "label": "V (Н/с)",
+                "default": "от 100 до 250"
+              },
+              {
+                "key": "t",
+                "label": "t (с)",
+                "default": "30"
+              }
+            ]
+          },
+          {
+            "type": "note",
+            "text": "Осмотр образца с указанием характера и места повреждения"
+          },
+          {
+            "type": "fields",
+            "items": [
+              {
+                "key": "inspect",
+                "label": "Характер и место повреждения"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

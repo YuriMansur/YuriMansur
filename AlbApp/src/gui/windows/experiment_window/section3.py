@@ -5,6 +5,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, QTimer, Qt, QPoint
 from PyQt6.QtGui import QPainter, QColor, QPolygon
 
+from tag_binder import tags   # запись/чтение тегов ПЛК по имени из servers.json
+
 
 class _StripedOverlay(QWidget):
     """Анимированные диагональные полоски поверх кнопки."""
@@ -165,13 +167,14 @@ _METHODIC_FILES = {
 
 
 def _load_methodic(gost: str, method: str) -> dict | None:
-    """Загрузить описание методики из methodics/<файл>.json (или None, если нет)."""
+    """Загрузить описание методики из patch/<файл>.json (или None, если нет)."""
     import json
     from pathlib import Path
     fname = _METHODIC_FILES.get(method)
     if not fname:
         return None
-    path = Path(__file__).parent / "methodics" / fname
+    # методики подкладываются в AlbApp/patch (src/gui/windows/experiment_window → AlbApp)
+    path = Path(__file__).parents[4] / "patch" / fname
     if not path.exists():
         return None
     try:
@@ -438,6 +441,28 @@ class _SideFrame(QFrame):
         self._overlay.raise_()
 
 
+class _HeaderFrame(QFrame):
+    """Шапка мастера: при нехватке ширины прячет блок метаданных, чтобы
+    содержимое (иконка, заголовок, «Прервать») не вылезало за границу секции."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._meta = None        # сворачиваемый блок метаданных
+        self._min_full = 0       # минимальная ширина, при которой блок показываем
+
+    def set_collapsible(self, meta, min_full: int):
+        self._meta = meta
+        self._min_full = min_full
+        self._update_meta()
+
+    def _update_meta(self):
+        if self._meta is not None:
+            self._meta.setVisible(self.width() >= self._min_full)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._update_meta()
+
+
 class _CyclicWizard(QWidget):
     """Пошаговый мастер испытания: шаги из PROCEDURES, стиль из темы приложения."""
     started = pyqtSignal(bool)
@@ -453,6 +478,7 @@ class _CyclicWizard(QWidget):
         self._form_values: dict[str, dict] = {}
         # флаги, выставляемые опциями decision (например, passed для протокола)
         self._flags: dict = {}
+        self._sample_info_provider = None   # callable → dict «инфо об образце» (сек.2)
         self._jump_target = None    # индекс шага, на который указывает стрелка «→»
         self._build_steps()
         if start_index is not None:   # восстановление позиции при смене темы
@@ -497,6 +523,11 @@ class _CyclicWizard(QWidget):
         self._render_step(self._current)
 
     # ── формирование шагов ─────────────────────────────────────────────────
+    # Нулевой шаг инициализации — общий для всех методик (добавляется первым).
+    _INIT_STEP = {"id": "__init__", "group": "ИНИЦИАЛИЗАЦИЯ",
+                  "title": "Инициализация оборудования",
+                  "sub": "Включение и проверки исправности", "kind": "init"}
+
     def _build_steps(self):
         data = (_load_methodic(self._gost, self._method)
                 if self._gost in ("Р ИСО 10328-2021", "Р53868-2021") else None)
@@ -511,15 +542,18 @@ class _CyclicWizard(QWidget):
             proc = PROCEDURES.get((self._gost, self._method))
             self._htitle, self._steps = _steps_from_procedure(proc or _DEFAULT_PROCEDURE)
             self._current = 0
+        # нулевой шаг инициализации — первым во всех методиках
+        self._steps.insert(0, dict(self._INIT_STEP))
 
     # ── шапка ──────────────────────────────────────────────────────────────
     def _build_header(self) -> QFrame:
-        f = QFrame()
+        f = _HeaderFrame()
         f.setObjectName("wzHeader")
         f.setStyleSheet(
             f"QFrame#wzHeader {{ background: {_WZ['header_bg']};"
             f" border: 1px solid {_WZ['border']}; border-radius: 8px; }}"
             " QLabel { background: transparent; }")
+        f.setFixedHeight(56)   # фиксированная высота — шапка не меняет размер
         lay = QHBoxLayout(f)
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(12)
@@ -533,20 +567,29 @@ class _CyclicWizard(QWidget):
         lay.addWidget(icon, 0)
         lay.addWidget(title, 1)
 
-        sample = QLabel(
-            f"<span style='color:{_WZ['muted']}; font-size:11px;'>Образец</span>"
-            f"<br><span style='color:{_WZ['text']};'>#КУ-2024-017</span>")
-        lay.addWidget(sample, 0)
-
-        equip = QLabel(
-            f"<span style='color:{_WZ['green']};'>● Оборудование</span>"
-            f"<br><span style='color:{_WZ['green']};'>подключено</span>")
-        lay.addWidget(equip, 0)
-
-        sess = QLabel(
-            f"<span style='color:{_WZ['muted']}; font-size:11px;'>Сессия…</span>"
-            f"<br><span style='color:{_WZ['text']};'>14:32</span>")
-        lay.addWidget(sess, 0)
+        # метаданные сессии — один компактный блок (разделители внутри, чтобы
+        # не раздувать ширину шапки и не вылезать за границу секции)
+        meta = QWidget()
+        mrow = QHBoxLayout(meta)
+        mrow.setContentsMargins(0, 0, 0, 0)
+        mrow.setSpacing(8)
+        mrow.addWidget(self._h_meta("Образец", "Коленный узел"))
+        mrow.addWidget(self._h_sep())
+        mrow.addWidget(self._h_meta("Шифр", "#КУ-2024-017"))
+        mrow.addWidget(self._h_sep())
+        mrow.addWidget(self._h_meta("Оборудование", "● подключено",
+                                    value_color=_WZ['green'], caption_color=_WZ['green']))
+        mrow.addWidget(self._h_sep())
+        mrow.addWidget(self._h_meta("Сессия", "14:32"))
+        # блок метаданных не должен задавать минимальную ширину шапки, иначе
+        # она не сожмётся в узкой колонке и вылезет за границу секции
+        from PyQt6.QtWidgets import QSizePolicy
+        meta.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        lay.addWidget(meta, 0)
+        # метаданные показываем только когда шапке хватает ширины; иначе
+        # сворачиваем, чтобы «Прервать» и заголовок не уходили за границу секции
+        meta.adjustSize()
+        f.set_collapsible(meta, meta.sizeHint().width() + 320)
 
         # кнопка прерывания испытания — доступна на каждом шаге
         btn_stop = QPushButton("⛔ Прервать")
@@ -558,6 +601,33 @@ class _CyclicWizard(QWidget):
         btn_stop.clicked.connect(self._interrupt_test)
         lay.addWidget(btn_stop, 0)
         return f
+
+    # ── элементы шапки: разделитель и блок «подпись над значением» ──────────
+    def _h_sep(self) -> QFrame:
+        """Тонкая вертикальная линия-разделитель между блоками метаданных."""
+        s = QFrame()
+        s.setFixedWidth(1)
+        s.setFixedHeight(30)
+        s.setStyleSheet(f"background: {_WZ['border']};")
+        return s
+
+    def _h_meta(self, caption: str, value: str,
+                value_color: str = None, caption_color: str = None) -> QWidget:
+        """Блок метаданных: серая подпись сверху, значение снизу (выровнены)."""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(1)
+        cap = QLabel(caption)
+        cap.setStyleSheet(
+            f"color: {caption_color or _WZ['muted']}; font-size: 10px; background: transparent;")
+        val = QLabel(value)
+        val.setStyleSheet(
+            f"color: {value_color or _WZ['text']}; font-size: 12px; font-weight: bold;"
+            " background: transparent;")
+        v.addWidget(cap)
+        v.addWidget(val)
+        return w
 
     # ── боковой степпер ────────────────────────────────────────────────────
     def _build_sidebar(self) -> QScrollArea:
@@ -650,8 +720,8 @@ class _CyclicWizard(QWidget):
         self._jump_target = None   # стрелка-указатель снимается после перехода
         self._refresh_sidebar()
         self._render_step(idx)
-        # испытание считается «идущим» вне группы ПОДГОТОВКА → блок комбобоксов сек.2
-        self.started.emit(self._steps[idx]["group"] != "ПОДГОТОВКА")
+        # испытание считается «идущим» вне групп подготовки → блок комбобоксов сек.2
+        self.started.emit(self._steps[idx]["group"] not in ("ПОДГОТОВКА", "ИНИЦИАЛИЗАЦИЯ"))
 
     def _interrupt_test(self):
         """Кнопка «Прервать» — крупный стилизованный диалог подтверждения."""
@@ -736,7 +806,7 @@ class _CyclicWizard(QWidget):
         if self._items:
             active = self._items[proto]
             QTimer.singleShot(0, lambda: self._side_scroll.ensureWidgetVisible(active, 0, 40))
-        self.started.emit(self._steps[proto]["group"] != "ПОДГОТОВКА")
+        self.started.emit(self._steps[proto]["group"] not in ("ПОДГОТОВКА", "ИНИЦИАЛИЗАЦИЯ"))
 
     @staticmethod
     def _clear(lay):
@@ -789,7 +859,9 @@ class _CyclicWizard(QWidget):
         badge_row.addStretch()
         self._content.addLayout(badge_row)
 
-        if step["kind"] == "form":
+        if step["kind"] == "init":
+            self._render_init(step)
+        elif step["kind"] == "form":
             self._render_form(step)
         elif step["kind"] == "stab":
             self._render_stabilization(step.get("decision", True), step.get("banner", True), step.get("inputs", True))
@@ -837,6 +909,12 @@ class _CyclicWizard(QWidget):
             row = QHBoxLayout()
             b = self._btn(blk["text"])
             b.setEnabled(not self._previewing)
+            # кнопка с полем "tag" сама пишет на ПЛК (значение из "value", по
+            # умолчанию 1) — движок понимает из конфига, что слать
+            tag = blk.get("tag")
+            if tag is not None:
+                val = blk.get("value", 1)
+                b.clicked.connect(lambda _c=False, t=tag, v=val: tags.write(t, v))
             row.addWidget(b, 0)
             row.addStretch()
             c.addLayout(row)
@@ -865,6 +943,14 @@ class _CyclicWizard(QWidget):
                 key = it["key"]
                 store.setdefault(key, it.get("default", ""))
                 row.addLayout(self._input(it["label"], store[key], self._form_setter(store, key)), 1)
+            c.addLayout(row)
+        elif bt == "cards":
+            # информационные плитки (значение + подпись); цвет — имя из палитры
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            for it in blk["items"]:
+                col = accents.get(it.get("color")) or _WZ.get(it.get("color", "title"), _WZ["title"])
+                row.addWidget(self._card(it.get("value", "—"), col, it.get("caption", "")), 1)
             c.addLayout(row)
         elif bt == "fixture":
             self._render_form_fixture(c, store, blk.get("question", "Использовалось специальное приспособление?"))
@@ -1046,9 +1132,88 @@ class _CyclicWizard(QWidget):
             c.addLayout(self._step_nav("Далее →"))
             return
         nav = QHBoxLayout()
-        btn = self._btn("📄 Генерация протокола", primary=True)
+        btn = self._btn("✓ Завершить испытание", primary=True)
+        btn.clicked.connect(self._finish_test)
         nav.addWidget(btn, 1)
         c.addLayout(nav)
+
+    def _finish_test(self):
+        """Завершение испытания: автогенерация протокола + завершение алгоритма
+        (сброс мастера к началу для нового образца)."""
+        if not self._generate_protocol():
+            return                       # протокол не сформирован — мастер не сбрасываем
+        self._abort_test()               # завершение алгоритма: сброс состояния и шагов
+
+    def _generate_protocol(self) -> bool:
+        """Сформировать .docx-протокол из данных мастера и открыть в Word.
+        Возвращает True при успехе."""
+        from PyQt6.QtWidgets import QMessageBox
+        data = {
+            "gost":    self._gost,
+            "method":  self._method,
+            "title":   self._htitle,
+            "passed":  self._flags.get("passed"),
+            "fields":  self._form_values,
+        }
+        # данные «Информация об исследуемом образце» из секции 2
+        if self._sample_info_provider:
+            data.update(self._sample_info_provider() or {})
+        try:
+            from protocols.generator import generate_protocol
+            path = generate_protocol(data)
+        except Exception as e:                       # noqa: BLE001 — показать любую ошибку
+            QMessageBox.critical(self, "Протокол", f"Не удалось сформировать протокол:\n{e}")
+            return False
+        # автоматически открыть протокол в системном Word
+        try:
+            import os
+            os.startfile(str(path))
+        except OSError as e:
+            QMessageBox.warning(
+                self, "Протокол",
+                f"Протокол сформирован:\n{path}\n\nНо открыть автоматически не удалось:\n{e}")
+        return True
+
+    # ── нулевой шаг: инициализация оборудования ─────────────────────────────
+    def _render_init(self, step: dict):
+        c = self._content
+        h = QLabel(step.get("title", "Инициализация оборудования"))
+        h.setWordWrap(True)
+        h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
+        c.addWidget(h)
+
+        note = QLabel("Включение оборудования и внутренние проверки исправности перед началом испытания.")
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            f"background: {_WZ['card_bg']}; color: {_WZ['text']};"
+            f" border-left: 3px solid {_WZ['blue']}; border-radius: 4px; padding: 8px 12px;")
+        c.addWidget(note)
+
+        # плитки внутренних проверок (заглушки — позже статусы от оборудования)
+        checks = QHBoxLayout()
+        checks.setSpacing(8)
+        for cap in ("Питание", "Связь с ПЛК", "Датчики"):
+            checks.addWidget(self._card("—", _WZ['muted'], cap), 1)
+        c.addLayout(checks)
+
+        c.addStretch()
+        if self._previewing:
+            c.addLayout(self._step_nav("Далее →"))
+            return
+        nav = QHBoxLayout()
+        btn = self._btn("▶ Начать испытание", primary=True)
+        btn.clicked.connect(self._start_test)
+        nav.addWidget(btn, 1)
+        c.addLayout(nav)
+
+    def _start_test(self):
+        """Начать испытание: если в шаге задан start_tag — отправить его на ПЛК
+        (имя/значение берутся из конфига), затем перейти к первому шагу."""
+        step = self._steps[self._current]
+        tag = step.get("start_tag")
+        if tag is not None:
+            tags.write(tag, step.get("start_value", 1))
+        self._goto(self._current + 1)
 
     # ── кнопка-переключатель: меняет цвет при нажатии ───────────────────────
     def _toggle_btn(self, text: str) -> QPushButton:
@@ -1090,7 +1255,7 @@ class _CyclicWizard(QWidget):
         c.addWidget(h)
 
         if banner:
-            note = QLabel("Цикл: приложить Fstab = 800 Н на 20 с, затем F = 0 на 12 минут.")
+            note = QLabel("Цикл: приложить Fset = 800 Н на 20 с, затем F = 0 на 12 минут.")
             note.setWordWrap(True)
             note.setStyleSheet(
                 f"background: {_WZ['card_bg']}; color: {_WZ['text']};"
@@ -1100,7 +1265,7 @@ class _CyclicWizard(QWidget):
         if inputs:
             in_row = QHBoxLayout()
             in_row.setSpacing(8)
-            in_row.addLayout(self._input("Fstab (Н)", "800"), 1)
+            in_row.addLayout(self._input("Fset (Н)", "800"), 1)
             in_row.addLayout(self._input("t нагрузки (с)", "20"), 1)
             in_row.addLayout(self._input("t разгрузки (мин)", "12"), 1)
             c.addLayout(in_row)
@@ -1109,7 +1274,7 @@ class _CyclicWizard(QWidget):
         cards.setSpacing(8)
         cards.addWidget(self._card("800 Н", _WZ['green'], "F текущее"), 1)
         cards.addWidget(self._card("18.4 с", _WZ['title'], "t прошло"), 1)
-        cards.addWidget(self._card("2.1 мм", _WZ['title'], "δ при Fstab"), 1)
+        cards.addWidget(self._card("2.1 мм", _WZ['title'], "δ при Fset"), 1)
         c.addLayout(cards)
 
         if self._previewing or not decision:
@@ -1251,7 +1416,15 @@ class Section3Widget(QWidget):
         self._gost    = ""
         self._method  = ""
         self._wizard  = None
+        self._sample_info_provider = None   # callable → dict «инфо об образце»
         self._rebuild()
+
+    def set_sample_info_provider(self, fn):
+        """Источник данных «Информация об исследуемом образце» (из секции 2)
+        для включения в протокол."""
+        self._sample_info_provider = fn
+        if self._wizard is not None:
+            self._wizard._sample_info_provider = fn
 
     def set_params(self, gost: str, method: str):
         """Вызывается из Section2Widget при смене ГОСТ или методики."""
@@ -1274,6 +1447,7 @@ class Section3Widget(QWidget):
     def _build_wizard(self, start_index=None):
         """Построить пошаговый мастер для текущей (ГОСТ, методика)."""
         self._wizard = _CyclicWizard(self._gost, self._method, start_index=start_index)
+        self._wizard._sample_info_provider = self._sample_info_provider
         self._wizard.started.connect(self.started)   # проброс блокировки комбобоксов сек.2
         self._scroll.setWidget(self._wizard)
 
