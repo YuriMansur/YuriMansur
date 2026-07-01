@@ -1,0 +1,11 @@
+{
+  "_comment": "Какие теги писать в БД сообщений. Тег должен читаться (быть в subscribe/polls servers.json). on = фронт 0->1, off = фронт 1->0 (необязателен). level: INFO|WARN|ALARM. (Мигание аварии по general_fault задаётся в коде и от этого конфига не зависит.)",
+  "tags": [
+    {
+      "tag": "general_fault",
+      "category": "ПЛК",
+      "on":  { "level": "ALARM", "message": "Общая авария активна" },
+      "off": { "level": "INFO",  "message": "Общая авария снята" }
+    }
+  ]
+}

@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,   # базовые виджеты и компоновка
     QColorDialog, QFileDialog,                        # диалоги выбора цвета и сохранения файла
     QFrame, QDateEdit, QTimeEdit,                     # рамка навигации, поля ввода даты/времени
-    QLabel, QSpinBox,
+    QLabel, QSpinBox, QComboBox,
     QSlider, QWidgetAction, QCheckBox,                # слайдер прозрачности, чекбокс точек
     QDialog, QDialogButtonBox,                        # диалог выбора каналов для выгрузки
 )
@@ -179,17 +179,13 @@ class TrendsWiget(QWidget):
         row_mode.setContentsMargins(6, 4, 6, 4)
         row_mode.setSpacing(6)
 
-        self.btn_live    = QPushButton("● Live")
-        self.btn_archive = QPushButton("Архив")
-        self.btn_live   .setCheckable(True)
-        self.btn_archive.setCheckable(True)
-        self.btn_live   .setChecked(True)
-        self.btn_live   .setStyleSheet(_btn_mode_style(True))
-        self.btn_archive.setStyleSheet(_btn_mode_style(True))
-        self.btn_live   .clicked.connect(lambda: self._set_mode("live"))
-        self.btn_archive.clicked.connect(lambda: self._set_mode("archive"))
-        row_mode.addWidget(self.btn_live)
-        row_mode.addWidget(self.btn_archive)
+        self.cb_mode = QComboBox()
+        self.cb_mode.addItem("● Live", "live")
+        self.cb_mode.addItem("Архив",  "archive")
+        # activated — только пользовательский выбор (программная смена индекса не дёргает)
+        self.cb_mode.activated.connect(lambda _i: self._set_mode(self.cb_mode.currentData()))
+        row_mode.addWidget(QLabel("Режим:"))
+        row_mode.addWidget(self.cb_mode)
         row_mode.addStretch()
         root.addWidget(nav_frame)
 
@@ -577,9 +573,8 @@ class TrendsWiget(QWidget):
         self._mode = mode
         vb = self.plot_widget.getViewBox()
         self._export_menu_action.setVisible(mode == "archive")
+        self.cb_mode.setCurrentIndex(0 if mode == "live" else 1)
         if mode == "live":
-            self.btn_live   .setChecked(True)
-            self.btn_archive.setChecked(False)
             self._arch_panel.setVisible(False)
             self.plot_widget.setLabel("bottom", "Время")
             self.plot_widget.setLabel("left", "Значение")
@@ -597,8 +592,6 @@ class TrendsWiget(QWidget):
             vb.setAutoVisible(y=False)
             self._render_timer.start(LIVE_RENDER_MS)
         else:
-            self.btn_live   .setChecked(False)
-            self.btn_archive.setChecked(True)
             self._arch_panel.setVisible(True)
             for ch in self._channels.values():
                 self._disconnect_ch(ch)
@@ -1037,9 +1030,6 @@ from(bucket: "{INFLUX_BUCKET}")
         self._nav_frame.setStyleSheet(_nav_style(dark))
         self._ch_frame.setStyleSheet(panel_ss)
         self._arch_panel.setStyleSheet(panel_ss)
-        btn_ss = _btn_mode_style(dark)
-        self.btn_live.setStyleSheet(btn_ss)
-        self.btn_archive.setStyleSheet(btn_ss)
 
     def _build_graph_context_menu(self):
         menu = self.plot_widget.getViewBox().menu

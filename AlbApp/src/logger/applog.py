@@ -20,10 +20,10 @@ LEVEL_WARN  = "WARN"
 LEVEL_ALARM = "ALARM"
 
 # категории
-CAT_CONN   = "связь"
-CAT_PLC    = "плк"
-CAT_ACTION = "действие"
-CAT_SYS    = "система"
+CAT_CONN   = "Связь"
+CAT_PLC    = "ПЛК"
+CAT_ACTION = "Действие"
+CAT_SYS    = "Система"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_log (
@@ -59,36 +59,55 @@ def init_db() -> None:
 
 
 # ── запись ────────────────────────────────────────────────────────────────────
-def log(category: str, message: str, level: str = LEVEL_INFO,
-        source: str = None, details: dict = None) -> None:
-    """Записать событие в системный лог."""
+def make(category: str, message: str, level: str = LEVEL_INFO,
+         source: str = None) -> dict:
+    """Сформировать запись лога без записи в БД.
+
+    Готовую запись можно сразу отдать в шину для мгновенного вывода на вкладке
+    «Сообщения», а саму запись в БД сделать отдельно (в т.ч. в фоне).
+    """
+    return {"ts": _now(), "level": level, "category": category,
+            "source": source, "message": message}
+
+
+def persist(rec: dict, details: dict = None) -> None:
+    """Записать готовую запись в БД. Безопасно вызывать из фонового потока
+    (открывает собственное соединение; БД в режиме WAL)."""
     init_db()
     with _conn() as c:
         c.execute(
             "INSERT INTO app_log (ts, level, category, source, message, details)"
             " VALUES (?,?,?,?,?,?)",
-            (_now(), level, category, source, message,
+            (rec["ts"], rec["level"], rec["category"], rec["source"], rec["message"],
              json.dumps(details, ensure_ascii=False) if details else None))
 
 
-def log_connection(server: str, state: str, level: str = LEVEL_INFO) -> None:
+def log(category: str, message: str, level: str = LEVEL_INFO,
+        source: str = None, details: dict = None) -> dict:
+    """Сформировать и синхронно записать событие. Возвращает запись."""
+    rec = make(category, message, level=level, source=source)
+    persist(rec, details)
+    return rec
+
+
+def log_connection(server: str, state: str, level: str = LEVEL_INFO) -> dict:
     """Событие связи: подключено / отключено / переподключение."""
-    log(CAT_CONN, f"{server}: {state}", level=level, source=server)
+    return log(CAT_CONN, f"{server}: {state}", level=level, source=server)
 
 
-def log_alarm(source: str, message: str) -> None:
+def log_alarm(source: str, message: str) -> dict:
     """Авария ПЛК (уровень ALARM)."""
-    log(CAT_PLC, message, level=LEVEL_ALARM, source=source)
+    return log(CAT_PLC, message, level=LEVEL_ALARM, source=source)
 
 
-def log_action(message: str, source: str = "UI") -> None:
+def log_action(message: str, source: str = "UI") -> dict:
     """Действие оператора (нажатие кнопки и т.п.)."""
-    log(CAT_ACTION, message, level=LEVEL_INFO, source=source)
+    return log(CAT_ACTION, message, level=LEVEL_INFO, source=source)
 
 
 # ── выборки / обслуживание ────────────────────────────────────────────────────
 def list_logs(level: str = None, category: str = None,
-              since: str = None, limit: int = 1000) -> list[dict]:
+              since: str = None, until: str = None, limit: int = 1000) -> list[dict]:
     """Записи лога (новые сверху) с опц. фильтрами."""
     init_db()
     q = "SELECT * FROM app_log"
@@ -99,6 +118,8 @@ def list_logs(level: str = None, category: str = None,
         cond.append("category = ?"); args.append(category)
     if since:
         cond.append("ts >= ?");      args.append(since)
+    if until:
+        cond.append("ts <= ?");      args.append(until)
     if cond:
         q += " WHERE " + " AND ".join(cond)
     q += " ORDER BY id DESC"
@@ -106,6 +127,14 @@ def list_logs(level: str = None, category: str = None,
         q += " LIMIT ?"; args.append(limit)
     with _conn() as c:
         return [dict(r) for r in c.execute(q, args)]
+
+
+def ts_range() -> tuple:
+    """(min_ts, max_ts) по всем записям или (None, None), если лог пуст."""
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT MIN(ts), MAX(ts) FROM app_log").fetchone()
+    return (row[0], row[1]) if row else (None, None)
 
 
 def purge(days: int = 30) -> int:

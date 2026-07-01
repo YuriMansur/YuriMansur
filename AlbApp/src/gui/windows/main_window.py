@@ -7,6 +7,18 @@ from gui.windows.messages_window.messages_viewer import MessagesWidget
 from gui.style_classes.nav_button import NavigationButton
 
 
+def _load_log_tags() -> list:
+    """Прочитать patch/log_tags.json — какие теги логировать в БД сообщений."""
+    import json
+    from pathlib import Path
+    try:
+        p = Path(__file__).resolve().parents[3] / "patch" / "log_tags.json"
+        return json.loads(p.read_text(encoding="utf-8")).get("tags", [])
+    except (OSError, ValueError) as e:
+        print(f"[log_tags] не удалось прочитать конфиг: {e}")
+        return []
+
+
 class MainWindow(QMainWindow):
     def __init__(self):              
         super().__init__()
@@ -87,8 +99,11 @@ class MainWindow(QMainWindow):
         # Кортеж стилизации кнопок
         page_data = [
             ("🧪 Испытания", "#1abc9c"),
+            ("🎬 Видеоналожение", "#16a085"),
             ("📈 Тренды", "#3498db"),
             ("💬 Сообщения", "#e67e22"),
+            ("📤 Экспорт", "#27ae60"),
+            ("📄 Протоколы/Журналы", "#3498db"),
             ("⚙️ Настройки", "#9b59b6"),
         ]
 
@@ -113,51 +128,7 @@ class MainWindow(QMainWindow):
         # Добавление растяжки для выравнивания кнопок влево
         nav_layout.addStretch()
 
-        # Тогл светлой/тёмной темы справа
-        from PyQt6.QtWidgets import QPushButton
         self._dark_mode = True
-
-        self._btn_export_nav = QPushButton("📤 Экспорт")
-        self._btn_export_nav.setFixedHeight(36)
-        self._btn_export_nav.setToolTip("Экспорт")
-        self._btn_export_nav.setStyleSheet(
-            "QPushButton { background: #1abc9c; color: #10141a; font-weight: bold;"
-            " border-radius: 4px; padding: 0 12px; }"
-            "QPushButton:hover { background: #16a085; }"
-        )
-        self._btn_export_nav.clicked.connect(self._open_export)
-        nav_layout.addWidget(self._btn_export_nav)
-        nav_layout.addSpacing(8)
-
-        self._btn_protocols_nav = QPushButton("📄 Протоколы")
-        self._btn_protocols_nav.setFixedHeight(36)
-        self._btn_protocols_nav.setToolTip("Протоколы испытаний")
-        self._btn_protocols_nav.setStyleSheet(
-            "QPushButton { background: #3498db; color: white; font-weight: bold;"
-            " border-radius: 4px; padding: 0 12px; }"
-            "QPushButton:hover { background: #5dade2; }"
-        )
-        self._btn_protocols_nav.clicked.connect(self._open_protocols)
-        nav_layout.addWidget(self._btn_protocols_nav)
-        nav_layout.addSpacing(8)
-
-        self._btn_alarm_nav = QPushButton("⚠ Тест аварии")
-        self._btn_alarm_nav.setFixedHeight(36)
-        self._btn_alarm_nav.setToolTip("Тест аварии")
-        self._btn_alarm_nav.setStyleSheet(
-            "QPushButton { background: #c0392b; color: white; font-weight: bold;"
-            " border-radius: 4px; padding: 0 12px; }"
-            "QPushButton:hover { background: #e74c3c; }"
-        )
-        nav_layout.addSpacing(8)
-        nav_layout.addWidget(self._btn_alarm_nav)
-        nav_layout.addSpacing(8)
-
-        self._btn_theme = QPushButton("🌙")
-        self._btn_theme.setFixedSize(36, 36)
-        self._btn_theme.setToolTip("Переключить тему")
-        self._btn_theme.clicked.connect(self._toggle_theme)
-        nav_layout.addWidget(self._btn_theme)
 
 #Создание страниц
     def create_pages(self):
@@ -179,15 +150,128 @@ class MainWindow(QMainWindow):
         page3 = self.settings_widget
         page3.setObjectName("settings_page")
 
+        # Выбор темы живёт в настройках; стартовое значение — текущий режим
+        self.settings_widget.theme_combo.setCurrentIndex(0 if self._dark_mode else 1)
+        self.settings_widget.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+
+        # Страница 5: График на видео (постобработка записей)
+        from gui.windows.video_overlay_window.video_overlay_widget import VideoOverlayWidget
+        page_video = VideoOverlayWidget()
+        page_video.setObjectName("video_overlay_page")
+
+        # Страница 6: Экспорт (журнал испытаний, только чтение)
+        from gui.popups.export_viewer import ExportViewer
+        self._export_page = ExportViewer()
+        self._export_page.setObjectName("export_page")
+
+        # Страница 7: Протоколы (просмотр папки documents)
+        from gui.windows.protocols_window.protocols_widget import ProtocolsWidget
+        page_protocols = ProtocolsWidget()
+        page_protocols.setObjectName("protocols_page")
+
         # Добавляем страницы в контейнер (порядок = порядок вкладок навигации)
         self.stacked_widget.addWidget(page1)
+        self.stacked_widget.addWidget(page_video)
         self.stacked_widget.addWidget(page2)
         self.stacked_widget.addWidget(page_msg)
+        self.stacked_widget.addWidget(self._export_page)
+        self.stacked_widget.addWidget(page_protocols)
         self.stacked_widget.addWidget(page3)
 
         page1.alarm_test.connect(self._start_alarm_blink)
         page1.alarm_reset.connect(self._stop_alarm_blink)
-        self._btn_alarm_nav.clicked.connect(page1.alarm_test)
+
+        # Авария по тегу general_fault: читаем тег с ПЛК и по фронту 0→1
+        # поджигаем ту же аварию, что и «Тест аварии» (мигание рамки + прерывание
+        # в секции 3). По фронту 1→0 — сброс. Сам тег прокидывается в servers.json
+        # отдельно; до этого биндер просто предупредит, что имени ещё нет.
+        import threading
+        from tag_binder import tags
+        from logger import applog
+        from event_bus import bus
+
+        def _log_rt(rec):
+            # параллельно: показ на «Сообщениях» — мгновенно по сигналу,
+            # запись в БД — в фоновом потоке, чтобы показ не ждал диск.
+            bus.log_event.emit(rec)
+            threading.Thread(target=applog.persist, args=(rec,), daemon=True).start()
+
+        # Логирование тегов по конфигу patch/log_tags.json. По фронту 0→1/1→0
+        # пишем сообщение (текст+уровень из конфига) в БД сообщений.
+        self._log_tag_state: dict = {}   # tag -> последнее булево значение
+
+        def _make_log_handler(entry):
+            tag = entry["tag"]
+            cat = entry.get("category", applog.CAT_PLC)
+            spec_on  = entry.get("on")  or {}
+            spec_off = entry.get("off") or {}
+            self._log_tag_state[tag] = False
+
+            def _handler(val):
+                active = bool(val)
+                if active == self._log_tag_state.get(tag, False):
+                    return                         # только по фронту
+                self._log_tag_state[tag] = active
+                spec = spec_on if active else spec_off
+                msg = spec.get("message")
+                if msg:
+                    level = str(spec.get("level", applog.LEVEL_INFO)).upper()
+                    _log_rt(applog.make(cat, msg, level=level, source=tag))
+            return _handler
+
+        for _entry in _load_log_tags():
+            if _entry.get("tag"):
+                tags.on(_entry["tag"], _make_log_handler(_entry))
+
+        # Авария по general_fault — ВСЕГДА, независимо от конфига логов:
+        # мигание рамки + прерывание в секции 3. Это защитная функция, поэтому
+        # хардкод (логирование этого тега — отдельно и необязательно).
+        self._accident_active = False
+
+        def _on_accident(val, _p=page1):
+            active = bool(val)
+            if active and not self._accident_active:
+                _p.alarm_test.emit()
+            elif not active and self._accident_active:
+                _p.alarm_reset.emit()
+            self._accident_active = active
+
+        tags.on("general_fault", _on_accident)
+
+        # События связи → журнал «Сообщения» (категория Связь), по переходам:
+        # подключено (разово) / потеряна / переподключение (по триггеру reconnecting).
+        self._conn_seen = False    # было ли хоть одно успешное подключение
+        self._conn_up   = False    # текущее состояние связи
+
+        def _on_srv_connected(server):
+            if self._conn_up:
+                return                                     # уже подключены — не дублируем
+            self._conn_up = True
+            if not self._conn_seen:                        # «подключено» — только один раз
+                self._conn_seen = True
+                _log_rt(applog.make(applog.CAT_CONN, f"Связь с {server} установлена",
+                                    level=applog.LEVEL_INFO, source=server))
+            else:                                          # успешный реконнект после обрыва
+                _log_rt(applog.make(applog.CAT_CONN, f"Связь с {server} восстановлена",
+                                    level=applog.LEVEL_INFO, source=server))
+
+        def _on_srv_disconnected(server):
+            if not self._conn_up:
+                return                                     # уже потеряна — не спамим
+            self._conn_up = False
+            _log_rt(applog.make(applog.CAT_CONN, f"Связь с {server} потеряна",
+                                level=applog.LEVEL_WARN, source=server))
+
+        def _on_srv_reconnecting(server, *_):
+            # выводим на каждый триггер попытки (каждые ~5 с), пока нет связи
+            if self._conn_up:
+                return
+            _log_rt(applog.make(applog.CAT_CONN, "Переподключение к ПЛК…",
+                                level=applog.LEVEL_WARN, source=server))
+
+        bus.server_connected.connect(_on_srv_connected)
+        bus.server_disconnected.connect(_on_srv_disconnected)
+        bus.reconnecting.connect(_on_srv_reconnecting)
 
         # «Записать» в настройках (F-параметры/стенд) → секция 2 перечитывает данные
         self.settings_widget.f_parameters_wiget.saved.connect(page1._sec2.reload_params)
@@ -212,39 +296,6 @@ class MainWindow(QMainWindow):
             cam.recording_changed.connect(cam_settings.set_recording)
             cam.cameras_found.connect(_on_cam_found)
             cam.capabilities_found.connect(lambda res, fps, idx=i: cam_settings.set_capabilities(idx, res, fps))
-
-    def _open_export(self):
-        """Открыть просмотрщик журнала в немодальном окне (как «Документация»)."""
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout
-        from gui.popups.export_viewer import ExportViewer
-        dlg = getattr(self, "_export_dlg", None)
-        if dlg is not None and dlg.isVisible():
-            self._export_view.reload()      # обновить при повторном открытии
-            dlg.raise_()
-            dlg.activateWindow()
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Экспорт")
-        dlg.setModal(False)
-        dlg.resize(1000, 640)
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(0, 0, 0, 0)
-        self._export_view = ExportViewer()
-        lay.addWidget(self._export_view)
-        self._export_dlg = dlg
-        dlg.show()
-
-    def _open_protocols(self):
-        """Открыть папку documents/ в проводнике (docx в программе не открываем)."""
-        import os
-        from pathlib import Path
-        from PyQt6.QtWidgets import QMessageBox
-        docs = Path(__file__).resolve().parent.parent.parent.parent / "documents"
-        docs.mkdir(parents=True, exist_ok=True)
-        try:
-            os.startfile(str(docs))
-        except OSError as e:
-            QMessageBox.warning(self, "Документы", f"Не удалось открыть папку:\n{e}")
 
     def _start_alarm_blink(self):
         if hasattr(self, "_blink_timer") and self._blink_timer.isActive():
@@ -334,9 +385,8 @@ class MainWindow(QMainWindow):
                 if hasattr(w, "set_theme"):
                     w.set_theme(self._dark_mode)
 
-    def _toggle_theme(self):
-        self._dark_mode = not self._dark_mode
-        self._btn_theme.setText("🌙" if self._dark_mode else "☀️")
+    def _on_theme_changed(self, index: int):
+        self._dark_mode = bool(self.settings_widget.theme_combo.itemData(index))
         self.apply_theme()
 
     def _stop_alarm_blink(self):
@@ -353,6 +403,21 @@ class MainWindow(QMainWindow):
         # Переход к странице
         self.stacked_widget.setCurrentIndex(index)
 
+        # Журнал испытаний перечитываем при каждом заходе на вкладку
+        if (getattr(self, "_export_page", None) is not None
+                and self.stacked_widget.currentWidget() is self._export_page):
+            self._export_page.reload()
+
         # Обновление состояния кнопок навигации
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
+
+    def closeEvent(self, event):
+        # остановить фоновые потоки захвата камер, иначе приложение висит на выходе
+        from gui.windows.experiment_window.section1 import _CameraWidget
+        for cam in self.findChildren(_CameraWidget):
+            try:
+                cam._close_camera()
+            except Exception:
+                pass
+        super().closeEvent(event)

@@ -25,6 +25,9 @@ class EventBus(QObject):
     stream_points = pyqtSignal(str, list, list)    # (имя_потока, times, values) — точки для графика
     stream_array  = pyqtSignal(str, list)          # (имя_потока, data)          — сырой массив
 
+    # ── системный лог: мгновенный вывод строки в «Сообщения» ─────────────────
+    log_event     = pyqtSignal(object)             # запись лога (dict) — real-time, без опроса БД
+
     # ── диагностика (worker → лог); пока зарезервировано ─────────────────────
     data_updated    = pyqtSignal(str, str, object)
     write_completed = pyqtSignal(str, str, bool)

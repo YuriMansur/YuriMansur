@@ -1,4 +1,6 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QFrame
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame, QLabel, QComboBox,
+)
 from gui.windows.settings_window.F_parameters import FWindow
 from gui.windows.settings_window.tab_wigets.ui_cameras_settings import CameraSettingsWidget
 
@@ -22,6 +24,20 @@ class SettingsWidget(QWidget):
         self.f_parameters_wiget = FWindow()
         self.cameras_widget     = CameraSettingsWidget()
 
+        # ── Тема оформления (над блоком камер, в правой колонке) ───────────────
+        theme_frame = QFrame()
+        theme_frame.setObjectName("section")
+        theme_frame.setStyleSheet("QFrame#section { border: 1px solid #555555; border-radius: 4px; }")
+        theme_row = QHBoxLayout(theme_frame)
+        theme_row.setContentsMargins(8, 6, 8, 6)
+        theme_row.addWidget(QLabel("Тема:"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("Тёмная",  True)
+        self.theme_combo.addItem("Светлая", False)
+        self.theme_combo.setFixedWidth(160)
+        theme_row.addWidget(self.theme_combo)
+        theme_row.addStretch()
+
         cam_frame = QFrame()
         cam_frame.setObjectName("section")
         cam_frame.setStyleSheet("QFrame#section { border: 1px solid #555555; border-radius: 4px; }")
@@ -29,8 +45,17 @@ class SettingsWidget(QWidget):
         cam_lay.setContentsMargins(8, 8, 8, 8)
         cam_lay.addWidget(self.cameras_widget)
 
+        # правая колонка: тема сверху, под ней камеры
+        right_col = QWidget()
+        right_v = QVBoxLayout(right_col)
+        right_v.setContentsMargins(0, 0, 0, 0)
+        right_v.setSpacing(8)
+        right_v.addWidget(theme_frame)
+        right_v.addWidget(cam_frame)
+        right_v.addStretch()
+
         from PyQt6.QtCore import Qt
-        self.f_parameters_wiget._row_layout.addWidget(cam_frame, 0, Qt.AlignmentFlag.AlignTop)
+        self.f_parameters_wiget._row_layout.addWidget(right_col, 0, Qt.AlignmentFlag.AlignTop)
 
         layout.addWidget(self.f_parameters_wiget)
 

@@ -8,6 +8,20 @@ from PyQt6.QtGui import QPainter, QColor, QPolygon
 from tag_binder import tags   # запись/чтение тегов ПЛК по имени из servers.json
 
 
+def _defer(fn) -> None:
+    """Отложить fn на следующий тик, безопасно к уничтожению виджетов.
+
+    singleShot(0)-колбэки часто стреляют уже после пересборки панели/закрытия,
+    когда C++-объект виджета удалён — глушим RuntimeError вместо мусора в консоли.
+    """
+    def _run():
+        try:
+            fn()
+        except RuntimeError:
+            pass
+    QTimer.singleShot(0, _run)
+
+
 class _StripedOverlay(QWidget):
     """Анимированные диагональные полоски поверх кнопки."""
     def __init__(self, parent: QWidget):
@@ -696,7 +710,7 @@ class _CyclicWizard(QWidget):
         # держать активный шаг в видимой области степпера
         if 0 <= self._current < len(self._items):
             active = self._items[self._current]
-            QTimer.singleShot(0, lambda: self._side_scroll.ensureWidgetVisible(active, 0, 40))
+            _defer(lambda: self._side_scroll.ensureWidgetVisible(active, 0, 40))
 
     def _set_preview_highlight(self, idx):
         """Подсветить фоном (как у активного) выбранный для просмотра шаг — и только его."""
@@ -805,7 +819,7 @@ class _CyclicWizard(QWidget):
         self._render_step(proto)
         if self._items:
             active = self._items[proto]
-            QTimer.singleShot(0, lambda: self._side_scroll.ensureWidgetVisible(active, 0, 40))
+            _defer(lambda: self._side_scroll.ensureWidgetVisible(active, 0, 40))
         self.started.emit(self._steps[proto]["group"] not in ("ПОДГОТОВКА", "ИНИЦИАЛИЗАЦИЯ"))
 
     @staticmethod
@@ -873,7 +887,7 @@ class _CyclicWizard(QWidget):
         # при смене шага показываем контент с начала (полоса прокрутки сохраняет
         # старое значение при перестройке — иначе верх нового шага «уезжает» вниз);
         # для перерисовки того же шага позицию восстанавливает _rerender_keep_scroll
-        QTimer.singleShot(0, lambda: self._panel_scroll.verticalScrollBar().setValue(0))
+        _defer(lambda: self._panel_scroll.verticalScrollBar().setValue(0))
 
     # ── панель навигации шага: в режиме просмотра — только возврат ──────────
     def _step_nav(self, primary_text: str, finish: bool = False) -> QHBoxLayout:
@@ -1138,14 +1152,14 @@ class _CyclicWizard(QWidget):
         c.addLayout(nav)
 
     def _finish_test(self):
-        """Завершение испытания: автогенерация протокола + завершение алгоритма
-        (сброс мастера к началу для нового образца)."""
-        if not self._generate_protocol():
-            return                       # протокол не сформирован — мастер не сбрасываем
+        """Завершение испытания: создать папку испытания с Протоколом и Журналом,
+        затем завершить алгоритм (сброс мастера к началу для нового образца)."""
+        if not self._create_test_docs():
+            return                       # документы не созданы — мастер не сбрасываем
         self._abort_test()               # завершение алгоритма: сброс состояния и шагов
 
-    def _generate_protocol(self) -> bool:
-        """Сформировать .docx-протокол из данных мастера и открыть в Word.
+    def _create_test_docs(self) -> bool:
+        """Создать папку испытания с Протокол.docx и Журнал.docx, открыть её.
         Возвращает True при успехе."""
         from PyQt6.QtWidgets import QMessageBox
         data = {
@@ -1159,19 +1173,20 @@ class _CyclicWizard(QWidget):
         if self._sample_info_provider:
             data.update(self._sample_info_provider() or {})
         try:
-            from protocols.generator import generate_protocol
-            path = generate_protocol(data)
+            from protocols.generator import generate_test_docs
+            folder = generate_test_docs(data)
         except Exception as e:                       # noqa: BLE001 — показать любую ошибку
-            QMessageBox.critical(self, "Протокол", f"Не удалось сформировать протокол:\n{e}")
+            QMessageBox.critical(self, "Испытание",
+                                 f"Не удалось создать документы испытания:\n{e}")
             return False
-        # автоматически открыть протокол в системном Word
+        # открыть папку испытания (в ней Протокол.docx и Журнал.docx)
         try:
             import os
-            os.startfile(str(path))
+            os.startfile(str(folder))
         except OSError as e:
             QMessageBox.warning(
-                self, "Протокол",
-                f"Протокол сформирован:\n{path}\n\nНо открыть автоматически не удалось:\n{e}")
+                self, "Испытание",
+                f"Документы созданы:\n{folder}\n\nНо открыть папку не удалось:\n{e}")
         return True
 
     # ── нулевой шаг: инициализация оборудования ─────────────────────────────

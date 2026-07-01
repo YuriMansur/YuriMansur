@@ -1,4 +1,4 @@
-import datetime, os
+import datetime, os, time
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
@@ -139,6 +139,7 @@ class _CameraWidget(QWidget):
         self._cam_idx   = cam_idx
         self._cap       = None
         self._writer    = None
+        self._ts_file   = None   # сайдкар: реальное время каждого записанного кадра
         self._recording = False
         self._found: list = []   # последний результат скана: [(device_idx, name), ...]
         self._worker: _FrameWorker | None = None
@@ -381,6 +382,18 @@ class _CameraWidget(QWidget):
         path = os.path.join(os.path.expanduser("~"), f"rec_{ts}.avi")
         fourcc = _cv2.VideoWriter_fourcc(*"XVID")
         self._writer = _cv2.VideoWriter(path, fourcc, 25.0, (w, h))
+
+        # Сайдкар: на каждый записанный кадр — его реальное UTC-время (unix, сек).
+        # Нужен вкладке наложения графика для точной синхронизации видео с InfluxDB:
+        # writer жёстко на 25 fps, а реальный темп захвата плавает.
+        try:
+            self._ts_file = open(os.path.splitext(path)[0] + ".csv", "w",
+                                 encoding="utf-8", buffering=1)
+            self._ts_file.write("frame,timestamp\n")
+            self._frame_no = 0
+        except OSError:
+            self._ts_file = None
+
         self._recording = True
         self.recording_changed.emit(True)
         self._btn_rec.setEnabled(False)
@@ -397,6 +410,9 @@ class _CameraWidget(QWidget):
         if self._writer:
             self._writer.release()
             self._writer = None
+        if self._ts_file is not None:
+            self._ts_file.close()
+            self._ts_file = None
         self._btn_rec.setEnabled(True)
         self._lbl_status.setText("Камера открыта")
 
@@ -428,6 +444,10 @@ class _CameraWidget(QWidget):
     def _on_frame(self, frame):
         if self._recording and self._writer:
             self._writer.write(frame)
+            if self._ts_file is not None:
+                # время кадра пишем в том же порядке, в каком кадры идут в файл
+                self._ts_file.write(f"{self._frame_no},{time.time():.6f}\n")
+                self._frame_no += 1
         try:
             from PyQt6.QtGui import QImage
             from PyQt6.QtCore import QRect

@@ -43,6 +43,7 @@ def load_config() -> list[dict]:
         tags = {n: _node_id(ns, base + suffix) for n, suffix in items.items()}
 
         def resolve(tag: str, _name=name, _tags=tags) -> str:
+            
             if tag not in _tags:
                 raise ValueError(f"Сервер {_name}: тег '{tag}' не найден в секции 'tags'")
             return _tags[tag]
@@ -140,6 +141,28 @@ class _SubHandler:
             print(f"[SubHandler] error: {e}")
 
 
+async def _keep_existing(nodes: dict, kind: str) -> dict:
+    """Отсеять узлы, которых нет в адресном пространстве сервера.
+
+    Один отсутствующий узел (например, ещё не заведённый на ПЛК general_fault)
+    не должен ронять всё соединение в цикл реконнекта — пропускаем его с
+    предупреждением, остальные работают. Это же гасит шторм переподключений,
+    который копит сессии на сервере (BadTooManySessions). Прочие ошибки чтения
+    (реальный разрыв связи) пробрасываем — пусть срабатывает reconnect.
+    """
+    out: dict = {}
+    for nid, node in nodes.items():
+        try:
+            await node.read_value()
+            out[nid] = node
+        except Exception as e:
+            if "BadNodeIdUnknown" in str(e):
+                print(f"[worker] {kind}: узел отсутствует на сервере, пропуск: {nid}")
+            else:
+                raise
+    return out
+
+
 async def _run_connected(client: Client, live_q, cmd_q, procs: list):
     """Работает пока соединение живо. Исключение = разрыв → reconnect."""
     live_q.put_nowait({'type': 'connected', 'server': OPC_SERVER_ID})
@@ -149,10 +172,23 @@ async def _run_connected(client: Client, live_q, cmd_q, procs: list):
     sub_nodes   = {nid: client.get_node(nid) for nid in SUBSCRIBE_NIDS}
     write_nodes: dict = {}
 
-    # Подписка на кнопки и уставку
+    # Префлайт: убрать отсутствующие узлы, чтобы один ненайденный тег не валил
+    # всё соединение (и не плодил сессии на сервере).
+    poll_nodes = await _keep_existing(poll_nodes, "poll")
+    sub_nodes  = await _keep_existing(sub_nodes,  "subscribe")
+    poll_order = [nid for nid in POLL_NIDS if nid in poll_nodes]
+
+    # keepalive-узел: стандартный Server/ServerStatus/State (i=2259) есть на любом
+    # OPC UA сервере. Пингуем его каждый цикл, чтобы обрыв ловился даже когда все
+    # data-теги отсутствуют и poll_order пуст (иначе воркер молча висит «подключённым»).
+    status_node = client.get_node("i=2259")
+
+    # Подписка на кнопки и уставку (только на существующие узлы). Период
+    # публикации 100 мс — чтобы авария и уставка доезжали до GUI быстро.
     handler = _SubHandler(live_q, procs)
-    sub = await client.create_subscription(500, handler)
-    await sub.subscribe_data_change(list(sub_nodes.values()))
+    sub = await client.create_subscription(100, handler)
+    if sub_nodes:
+        await sub.subscribe_data_change(list(sub_nodes.values()))
 
     # Начальное чтение подписанных тегов (состояния кнопок)
     for nid, node in sub_nodes.items():
@@ -190,8 +226,9 @@ async def _run_connected(client: Client, live_q, cmd_q, procs: list):
             except _queue.Empty:
                 break
 
-        # Последовательный опрос массивов (порядок из конфига: cc → массивы)
-        for nid in POLL_NIDS:
+        # Последовательный опрос массивов (порядок из конфига: cc → массивы;
+        # отсутствующие на сервере узлы исключены префлайтом)
+        for nid in poll_order:
             val = await poll_nodes[nid].read_value()   # исключение → выход → reconnect
             for p in procs:
                 p.on_data(OPC_SERVER_ID, nid, val)
@@ -199,6 +236,9 @@ async def _run_connected(client: Client, live_q, cmd_q, procs: list):
             if raw_name:
                 live_q.put_nowait({'type': 'array', 'name': raw_name,
                                    'data': list(val) if val else []})
+
+        # keepalive: проверка живости соединения — детект обрыва даже без data-тегов
+        await status_node.read_value()   # исключение → выход → reconnect
 
         elapsed = loop.time() - t_start
         await asyncio.sleep(max(0.0, POLL_INTERVAL - elapsed))
