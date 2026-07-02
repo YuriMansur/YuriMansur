@@ -47,7 +47,10 @@ class MessagesWidget(QWidget):
         self._tbl.setShowGrid(True)
         self._tbl.setStyleSheet(
             "QTableWidget { gridline-color: #9aa5b1;"
-            " border: 2px solid #ffffff; border-radius: 4px; }")
+            " border: 2px solid #ffffff; border-radius: 4px; }"
+            " QHeaderView::section { background: #e67e22; color: #ffffff;"
+            " font-weight: bold; padding: 6px 10px;"
+            " border: none; border-right: 1px solid #d9741f; }")
         hh = self._tbl.horizontalHeader()
         for col in (0, 1, 2):
             hh.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
@@ -67,6 +70,7 @@ class MessagesWidget(QWidget):
         self._timer.start()
 
         self._apply_date_range(reset_selection=True)
+        self._date_filter.setVisible(self._cb_source.currentData() == "archive")
         self.reload()
 
     def _build_toolbar(self) -> QHBoxLayout:
@@ -81,7 +85,7 @@ class MessagesWidget(QWidget):
         self._cb_source.addItem("События", "buffer")
         self._cb_source.addItem("Архив",   "archive")
         self._cb_source.setToolTip("События — живой буфер в памяти; Архив — записи из БД")
-        self._cb_source.currentIndexChanged.connect(self.reload)
+        self._cb_source.currentIndexChanged.connect(self._on_source_changed)
         bar.addWidget(self._cb_source)
 
         bar.addWidget(QLabel("Уровень:"))
@@ -100,29 +104,36 @@ class MessagesWidget(QWidget):
         self._cb_cat.currentIndexChanged.connect(self.reload)
         bar.addWidget(self._cb_cat)
 
-        # пределы дат задаются по фактическому диапазону данных в _apply_date_range
-        bar.addWidget(QLabel("С:"))
+        # фильтр по дате/времени — только в режиме «Архив» (в «Событиях» скрыт).
+        # Пределы дат задаются по фактическому диапазону данных в _apply_date_range.
+        self._date_filter = QWidget()
+        df = QHBoxLayout(self._date_filter)
+        df.setContentsMargins(0, 0, 0, 0)
+        df.setSpacing(8)
+
+        df.addWidget(QLabel("С:"))
         self._date_from = QDateEdit()
         self._date_from.setDisplayFormat("dd.MM.yyyy")
         self._date_from.setCalendarPopup(True)
         self._date_from.dateChanged.connect(self.reload)
-        bar.addWidget(self._date_from)
+        df.addWidget(self._date_from)
         self._time_from = QTimeEdit(QTime(0, 0, 0))
         self._time_from.setDisplayFormat("HH:mm:ss")
         self._time_from.timeChanged.connect(self.reload)
-        bar.addWidget(self._time_from)
+        df.addWidget(self._time_from)
 
-        bar.addWidget(QLabel("По:"))
+        df.addWidget(QLabel("По:"))
         self._date_to = QDateEdit()
         self._date_to.setDisplayFormat("dd.MM.yyyy")
         self._date_to.setCalendarPopup(True)
         self._date_to.dateChanged.connect(self.reload)
-        bar.addWidget(self._date_to)
+        df.addWidget(self._date_to)
         self._time_to = QTimeEdit(QTime(23, 59, 59))
         self._time_to.setDisplayFormat("HH:mm:ss")
         self._time_to.timeChanged.connect(self.reload)
-        bar.addWidget(self._time_to)
+        df.addWidget(self._time_to)
 
+        bar.insertWidget(1, self._date_filter)   # сразу после заголовка, перед «Режим»
         return bar
 
     # ── данные ───────────────────────────────────────────────────────────────
@@ -182,17 +193,20 @@ class MessagesWidget(QWidget):
         return since, until
 
     def _matches_filter(self, rec: dict) -> bool:
+        # только уровень/источник; дата к «Событиям» не применяется (буфер = живые
+        # события сессии, фильтр по дате есть только в «Архиве»)
         lv  = self._cb_level.currentData()
         cat = self._cb_cat.currentData()
         if lv and rec.get("level") != lv:
             return False
         if cat and rec.get("category") != cat:
             return False
-        since, until = self._date_bounds()
-        ts = rec.get("ts") or ""
-        if ts < since or ts > until:
-            return False
         return True
+
+    def _on_source_changed(self):
+        # дата — только для архива; в «Событиях» поля дат скрыты
+        self._date_filter.setVisible(self._cb_source.currentData() == "archive")
+        self.reload()
 
     def _on_log_event(self, rec: dict):
         # буфер пополняется всегда; в таблицу пишем сразу только в режиме «События»

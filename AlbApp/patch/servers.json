@@ -7,13 +7,21 @@
       "reconnect_interval": 5,
       "ns": 4,
       "base": "|var|CODESYS Control Win V3 x64.Application.IMITATION.API.",
-      "tags": [
-        "general_fault",
-        "cc",
-        "tenzaSensorDataArr",
-        "displacementSensorArr",
-        "nowSetpoint"
-      ],
+      "index_enum": ["b_names", "c_data"],
+      "tags": {
+        "b_names": "b_names",
+        "c_data": "c_data",
+        "general_fault": "general_fault",
+        "cc": "i_data",
+        "tenzaSensorDataArr": "data_buffer[TENZA_ONE].value",
+        "displacementSensorArr": "data_buffer[DISPLACEMENT_ONE].value",
+        "nowSetpoint": "nowSetpoint",
+        "cmdEnableDriver": "commands[EN_DRIVER]",
+        "cmdDisableDriver": "commands[DIS_DRIVER]",
+        "cmdResetFault": "commands[RESET_FAULT]",
+        "cmdForwardJog": "commands[FW_JOG]",
+        "cmdBackwardJog": "commands[BW_JOG]"
+      },
       "subscribe": [
         "general_fault",
         "nowSetpoint"

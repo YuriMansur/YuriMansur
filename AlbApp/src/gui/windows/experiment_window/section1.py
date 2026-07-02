@@ -512,6 +512,17 @@ def _make_section1() -> QWidget:
     btn_down = QPushButton("▼")
     btn_down.setFixedSize(48, 48)
 
+    # запись команд в PLC (commands[...] через cmd-очередь):
+    # Вкл.привод — тумблер на 2 сигнала (вкл → EN_DRIVER, выкл → DIS_DRIVER),
+    # ▲/▼ — толчок (TRUE пока нажато, FALSE при отпускании)
+    from tag_binder import tags
+    btn_power.toggled.connect(
+        lambda on: tags.write("cmdEnableDriver" if on else "cmdDisableDriver", 1))
+    btn_up.pressed.connect(lambda: tags.write("cmdForwardJog", 1))
+    btn_up.released.connect(lambda: tags.write("cmdForwardJog", 0))
+    btn_down.pressed.connect(lambda: tags.write("cmdBackwardJog", 1))
+    btn_down.released.connect(lambda: tags.write("cmdBackwardJog", 0))
+
     # Скорость + тоглы + сброс/авария на одной строке
     motion_row = QHBoxLayout()
     motion_row.setSpacing(8)
@@ -532,19 +543,7 @@ def _make_section1() -> QWidget:
     slider.valueChanged.connect(lambda v: speed_lbl.setText(f"Скорость мм/сек: {v / 100:.2f}"))
     speed_col.addWidget(slider)
 
-    btn_reset = QPushButton("Сброс")
-
-    def _emit_reset():
-        from gui.windows.experiment_window.ui_experiment_wiget import ExperimentWidget
-        w = btn_reset.parent()
-        while w is not None:
-            if isinstance(w, ExperimentWidget):
-                w.alarm_reset.emit()
-                return
-            w = w.parent()
-
-    btn_reset.clicked.connect(_emit_reset)
-
+    # кнопка «Сброс» перенесена на верхнюю панель как «Сброс аварий» (main_window)
     right_col = QVBoxLayout()
     right_col.setSpacing(4)
     toggle_row = QHBoxLayout()
@@ -552,10 +551,6 @@ def _make_section1() -> QWidget:
     toggle_row.addWidget(btn_power)
     toggle_row.addWidget(btn_manual)
     right_col.addLayout(toggle_row)
-    alarm_row = QHBoxLayout()
-    alarm_row.setSpacing(4)
-    alarm_row.addWidget(btn_reset)
-    right_col.addLayout(alarm_row)
 
     motion_row.addLayout(arrows_col)
     motion_row.addLayout(speed_col)

@@ -74,6 +74,8 @@ def load_config() -> list[dict]:
             "endpoint":           srv["endpoint"],
             "auto_reconnect":     srv.get("auto_reconnect", True),
             "reconnect_interval": srv.get("reconnect_interval", 5),
+            "index_enum":         srv.get("index_enum"),   # тег, из типа которого берём карту имя→индекс
+            "enums":              srv.get("enums") or {},   # статические карты имя→индекс (не опубликованы на OPC)
             "tags":               tags,
             "subscribe":          [resolve(t) for t in srv.get("subscribe", [])],
             "polls": [
@@ -100,6 +102,8 @@ POLL_INTERVAL      = _POLL["interval"]            # секунд между оп
 POLL_NIDS          = _POLL["nodes"]               # порядок: cc, затем массивы
 SUBSCRIBE_NIDS     = _SRV["subscribe"]            # кнопки + уставка
 _LOGGING           = _SRV["logging"]              # описание кольцевых потоков
+_INDEX_ENUM        = _SRV.get("index_enum")       # имя тега-энума для резолва [ИМЯ]→[индекс]
+_STATIC_ENUMS      = _SRV.get("enums") or {}      # статические карты имя→индекс (напр. команды)
 
 # arr_node → тип сообщения для отправки «сырого» массива в GUI (если задан)
 RAW_ARRAY_MAP = {r["node"]: r["raw_array_msg"]
@@ -163,13 +167,68 @@ async def _keep_existing(nodes: dict, kind: str) -> dict:
     return out
 
 
+def _resolve_indices(nid: str, enum_map: dict) -> str:
+    """Заменить символьные индексы enum в пути на числовые: data_buffer[TENZA_ONE] → [0].
+
+    NodeId на сервере принимает только числовой индекс; символьные имена (как в
+    UaExpert/CODESYS) удобны в конфиге, но перед чтением их надо развернуть.
+    """
+    if not enum_map:
+        return nid
+    for name, idx in enum_map.items():
+        nid = nid.replace(f"[{name}]", f"[{idx}]")
+    return nid
+
+
+def _cast_value(val, vtype):
+    """Привести значение из cmd-очереди к типу узла (BOOL для команд, float/int)."""
+    if vtype == ua.VariantType.Boolean:
+        return bool(val)
+    if vtype in (ua.VariantType.Float, ua.VariantType.Double):
+        return float(val)
+    return int(val)
+
+
+async def _read_enum_map(client: Client) -> dict:
+    """Карта {имя_члена: индекс} из типа тега _INDEX_ENUM (напр. b_names → PN_VAL_RB).
+
+    Порядок enum берём с ПЛК, поэтому перестановка членов не путает каналы.
+    """
+    # старт со статических карт из конфига (если заданы), затем поверх — динамика
+    # со всех тегов-энумов (index_enum может быть строкой или списком: b_names, c_data…)
+    result = dict(_STATIC_ENUMS)
+    enum_tags = _INDEX_ENUM if isinstance(_INDEX_ENUM, (list, tuple)) else ([_INDEX_ENUM] if _INDEX_ENUM else [])
+    for tag in enum_tags:
+        if tag not in _TAGS:
+            continue
+        try:
+            node = client.get_node(_TAGS[tag])
+            dtn  = client.get_node(await node.read_data_type())
+            for prop in await dtn.get_properties():
+                bn = (await prop.read_browse_name()).Name
+                if bn == "EnumValues":
+                    result.update({ev.DisplayName.Text: ev.Value for ev in await prop.read_value()})
+                    break
+                if bn == "EnumStrings":
+                    result.update({lt.Text: i for i, lt in enumerate(await prop.read_value())})
+                    break
+        except Exception as e:
+            print(f"[worker] резолв enum '{tag}' не удался: {e}")
+    return result
+
+
 async def _run_connected(client: Client, live_q, cmd_q, procs: list):
     """Работает пока соединение живо. Исключение = разрыв → reconnect."""
     live_q.put_nowait({'type': 'connected', 'server': OPC_SERVER_ID})
 
-    # Кэш объектов узлов
-    poll_nodes  = {nid: client.get_node(nid) for nid in POLL_NIDS}
-    sub_nodes   = {nid: client.get_node(nid) for nid in SUBSCRIBE_NIDS}
+    # карта имя→индекс enum с ПЛК; символьные пути (data_buffer[TENZA_ONE]) при
+    # создании узла разворачиваются в числовые, ключи сопоставления остаются как в конфиге
+    enum_map = await _read_enum_map(client)
+
+    # Кэш объектов узлов: ключ — как в конфиге (для сопоставления в RingProc),
+    # сам узел — с числовым индексом (для чтения на сервере)
+    poll_nodes  = {nid: client.get_node(_resolve_indices(nid, enum_map)) for nid in POLL_NIDS}
+    sub_nodes   = {nid: client.get_node(_resolve_indices(nid, enum_map)) for nid in SUBSCRIBE_NIDS}
     write_nodes: dict = {}
 
     # Префлайт: убрать отсутствующие узлы, чтобы один ненайденный тег не валил
@@ -216,10 +275,16 @@ async def _run_connected(client: Client, live_q, cmd_q, procs: list):
                     print(f"[worker] неизвестная команда '{name}'")
                     continue
                 if nid not in write_nodes:
-                    write_nodes[nid] = client.get_node(nid)
+                    wn = client.get_node(_resolve_indices(nid, enum_map))
+                    try:
+                        vt = await wn.read_data_type_as_variant_type()
+                    except Exception:
+                        vt = ua.VariantType.Int64
+                    write_nodes[nid] = (wn, vt)
+                wn, vt = write_nodes[nid]
                 try:
-                    await write_nodes[nid].write_value(ua.DataValue(ua.Variant(int(val))))
-                    readback = await write_nodes[nid].read_value()
+                    await wn.write_value(ua.DataValue(ua.Variant(_cast_value(val, vt), vt)))
+                    readback = await wn.read_value()
                     live_q.put_nowait({'type': 'tag', 'name': name, 'val': readback})
                 except Exception as e:
                     print(f"[worker] write {name}: {e}")

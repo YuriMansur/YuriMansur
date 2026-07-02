@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QStackedWidget, QVBoxLayout, QHBoxLayout)
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QStackedWidget, QVBoxLayout, QHBoxLayout, QPushButton)
 from PyQt6.QtCore import QTimer
 from gui.windows.experiment_window.ui_experiment_wiget import ExperimentWidget
 from gui.windows.trengs_window.trends_wiget import TrendsWiget
@@ -99,11 +99,11 @@ class MainWindow(QMainWindow):
         # Кортеж стилизации кнопок
         page_data = [
             ("🧪 Испытания", "#1abc9c"),
-            ("🎬 Видеоналожение", "#16a085"),
+            ("🎬 Видеоналожение", "#e74c3c"),
             ("📈 Тренды", "#3498db"),
             ("💬 Сообщения", "#e67e22"),
             ("📤 Экспорт", "#27ae60"),
-            ("📄 Протоколы/Журналы", "#3498db"),
+            ("📄 Протоколы/Журналы", "#e84393"),
             ("⚙️ Настройки", "#9b59b6"),
         ]
 
@@ -127,6 +127,17 @@ class MainWindow(QMainWindow):
 
         # Добавление растяжки для выравнивания кнопок влево
         nav_layout.addStretch()
+
+        # Кнопка сброса аварий (справа, где раньше были «Протоколы»)
+        self._btn_reset_nav = QPushButton("⟲ Сброс аварий")
+        self._btn_reset_nav.setFixedHeight(36)
+        self._btn_reset_nav.setToolTip("Сброс аварий")
+        self._btn_reset_nav.setStyleSheet(
+            "QPushButton { background: #c0392b; color: white; font-weight: bold;"
+            " border-radius: 4px; padding: 0 14px; }"
+            "QPushButton:hover { background: #e74c3c; }"
+        )
+        nav_layout.addWidget(self._btn_reset_nav)
 
         self._dark_mode = True
 
@@ -180,6 +191,11 @@ class MainWindow(QMainWindow):
 
         page1.alarm_test.connect(self._start_alarm_blink)
         page1.alarm_reset.connect(self._stop_alarm_blink)
+        def _reset_faults(_=False, _p=page1):
+            from tag_binder import tags
+            tags.write("cmdResetFault", 1)   # одиночная запись TRUE на сервер (RESET_FAULT)
+            _p.alarm_reset.emit()            # локально погасить мигание аварии
+        self._btn_reset_nav.clicked.connect(_reset_faults)   # «Сброс аварий» на верхней панели
 
         # Авария по тегу general_fault: читаем тег с ПЛК и по фронту 0→1
         # поджигаем ту же аварию, что и «Тест аварии» (мигание рамки + прерывание

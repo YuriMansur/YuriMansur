@@ -53,7 +53,7 @@ class ProtocolsWidget(QWidget):
         bar.addWidget(self._btn_up)
 
         title = QLabel("Протоколы/Журналы")
-        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #3498db;")
+        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #e84393;")
         bar.addWidget(title, 1)
 
         btn_reload = QPushButton("⟳ Обновить")
@@ -69,7 +69,10 @@ class ProtocolsWidget(QWidget):
         self._tbl.setShowGrid(True)
         self._tbl.setStyleSheet(
             "QTableWidget { gridline-color: #9aa5b1;"
-            " border: 2px solid #ffffff; border-radius: 4px; }")
+            " border: 2px solid #ffffff; border-radius: 4px; }"
+            " QHeaderView::section { background: #e84393; color: #ffffff;"
+            " font-weight: bold; padding: 6px 10px;"
+            " border: none; border-right: 1px solid #d63384; }")
         self._tbl.setToolTip("Двойной клик: папка — открыть внутри, файл — открыть в Word")
         self._tbl.itemDoubleClicked.connect(self._on_double)
         hh = self._tbl.horizontalHeader()
