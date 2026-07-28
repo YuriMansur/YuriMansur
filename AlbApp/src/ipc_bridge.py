@@ -32,6 +32,7 @@ class IpcBridge(QObject):
         self._handlers = {
             'points':       lambda m: bus.stream_points.emit(m['name'], m['times'], m['vals']),
             'array':        lambda m: bus.stream_array.emit(m['name'], m['data']),
+            'rate':         lambda m: bus.stream_rate.emit(m['name'], m['step_ms']),
             'tag':          lambda m: bus.tag_state.emit(m['name'], m['val']),
             'connected':    lambda m: bus.server_connected.emit(m['server']),
             'disconnected': lambda m: bus.server_disconnected.emit(m['server']),

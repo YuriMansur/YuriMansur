@@ -6,16 +6,22 @@
       "auto_reconnect": true,
       "reconnect_interval": 5,
       "ns": 4,
-      "base": "|var|CODESYS Control Win V3 x64.Application.IMITATION.API.",
-      "index_enum": ["b_names", "c_data"],
+      "base": "|var|CODESYS Control Win V3 x64.Application.MAIN_VIRTUAL.API.",
+      "index_enum": ["b_names", "c_names"],
       "tags": {
         "b_names": "b_names",
-        "c_data": "c_data",
-        "general_fault": "general_fault",
+        "c_names": "c_names",
+        "s_names": "s_names",
+        "general_fault": "generalFault",
         "cc": "i_data",
         "tenzaSensorDataArr": "data_buffer[TENZA_ONE].value",
         "displacementSensorArr": "data_buffer[DISPLACEMENT_ONE].value",
         "nowSetpoint": "nowSetpoint",
+        "max_array_length": "max_array_length",
+        "cmd_status": "cmd_status",
+        "cmdExperimentRun": "commands[EXPERIMENT_RUN]",
+        "cmdExperimentEnd": "commands[EXPERIMENT_END]",
+        "cmdExperimentAbort": "commands[EXPERIMENT_ABORT]",
         "cmdEnableDriver": "commands[EN_DRIVER]",
         "cmdDisableDriver": "commands[DIS_DRIVER]",
         "cmdResetFault": "commands[RESET_FAULT]",
@@ -31,12 +37,20 @@
           "name": "arrays",
           "interval": 0.1,
           "sequential": true,
-          "tags": ["cc", "displacementSensorArr", "tenzaSensorDataArr"]
+          "tags": ["cc", "displacementSensorArr", "tenzaSensorDataArr", "cmd_status"]
         }
       ],
+      "status": {
+        "array": "cmd_status",
+        "enum": "s_names",
+        "prefix": "st:"
+      },
       "logging": {
         "index_tag": "cc",
-        "array_size": 50,
+        "record": {
+          "start": ["cmdExperimentRun"],
+          "stop":  ["cmdExperimentEnd", "cmdExperimentAbort"]
+        },
         "ring": [
           {
             "tag": "tenzaSensorDataArr",

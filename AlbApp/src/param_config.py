@@ -68,8 +68,25 @@ def methods(gost: str) -> list[str]:
 
 
 def f_fields() -> list[str]:
-    """Полный список ключей полей сил (порядок отображения)."""
-    return _config().get("f_fields", [])
+    """Полный список ключей полей сил (порядок отображения).
+
+    f_fields задаёт порядок, но не ограничивает набор: ключи, дописанные в
+    fields конкретного ГОСТа и не перечисленные в f_fields, добавляются в конец.
+
+    Иначе новое поле пришлось бы вписывать в два места: экраны параметров и
+    секции 2 создают виджеты именно по этому списку, а fields ГОСТа только
+    показывает и прячет уже созданные — поле, добавленное лишь в gosts[...],
+    молча не появлялось бы нигде.
+    """
+    cfg   = _config()
+    order = list(cfg.get("f_fields", []))
+    seen  = set(order)
+    for g in cfg.get("gosts", {}).values():
+        for key in g.get("fields", []):
+            if key not in seen:
+                seen.add(key)
+                order.append(key)
+    return order
 
 
 def stand_fields() -> list[tuple[str, str]]:

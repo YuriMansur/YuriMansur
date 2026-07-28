@@ -1,16 +1,30 @@
+import time as _time
+
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 from PyQt6.QtCore import Qt, QTimer
+import numpy as np
 import pyqtgraph as pg
+
+from event_bus import bus
+from gui.windows.trengs_window._axis_item import _TimeAxisItem  # ось X с метками ЧЧ:ММ:СС
 
 pg.setConfigOptions(antialias=True)
 
 _CHART_TITLES = ["Нагружение, H", "Скорость нагружения H/сек", "Положение, L мм"]
 _CH_COLORS    = ["#e67e22", "#3498db", "#2ecc71"]
 _CHART_UNITS  = ["Н", "Н/сек", "мм"]
+# Живой поток bus.stream_points на график (None — без привязки; «Скорость» — производная,
+# отдельного потока нет). Имена потоков — points_msg из servers.json (logging.ring).
+_CHART_STREAMS = ["tenza", None, "displacement"]
+_MAX_POINTS    = 3000    # скользящее окно точек на кривую
+_SAMPLE_DT     = 0.004   # шаг отсчёта, сек (как timedelta(ms=4) в RingProc) — для оси времени
 
 
-def _make_plot(title: str, color: str) -> pg.PlotWidget:
-    pw = pg.PlotWidget()
+def _make_plot(title: str, color: str, time_axis: bool = False) -> pg.PlotWidget:
+    # для привязанных графиков ось X — время (ЧЧ:ММ:СС) через ts_offset; шаг равномерный
+    axis = _TimeAxisItem(orientation="bottom") if time_axis else None
+    pw = pg.PlotWidget(axisItems={"bottom": axis} if axis else None)
+    pw._time_axis = axis
     pw.setBackground("#1a252f")
     pw.showGrid(x=True, y=True, alpha=0.25)
     pw.setMinimumHeight(120)
@@ -82,13 +96,13 @@ def style_value_boxes(plots: list, dark: bool = None):
 
 def make_section4(parent_layout: QVBoxLayout) -> list:
     plots = []
-    for title, color, unit in zip(_CHART_TITLES, _CH_COLORS, _CHART_UNITS):
+    for title, color, unit, stream in zip(_CHART_TITLES, _CH_COLORS, _CHART_UNITS, _CHART_STREAMS):
         container = QWidget()
         col = QVBoxLayout(container)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(4)
 
-        pw = _make_plot(title, color)
+        pw = _make_plot(title, color, time_axis=bool(stream))
         box = _make_value_box(color, unit)
         col.addWidget(pw, 1)
         col.addWidget(box, 0)
@@ -105,7 +119,53 @@ def make_section4(parent_layout: QVBoxLayout) -> list:
     timer.start()
     plots[0]._value_timer = timer    # держим ссылку, чтобы таймер не уничтожился
 
+    # привязка живых потоков к кривым (tenza → «Нагружение», displacement → «Положение»)
+    plots[0]._stream_binder = _StreamBinder(plots, _CHART_STREAMS)
+
     return plots
+
+
+class _StreamBinder:
+    """Накопление живых точек bus.stream_points в кривые графиков секции 4.
+
+    Один экземпляр на секцию. Скользящее окно последних _MAX_POINTS точек.
+    По X — равномерный шаг _SAMPLE_DT (индекс отсчёта × шаг), а НЕ времена из
+    потока: синтетический таймлайн воркера местами рвётся (сброс _last_ts при
+    реконнекте/ошибке записи), из-за чего кривая «плыла» бы по X. Реальное время
+    на метках оси даёт _TimeAxisItem.ts_offset = момент первого отсчёта (unix)."""
+
+    def __init__(self, plots: list, streams: list):
+        self._t0 = None              # unix-время первого отсчёта (для меток оси)
+        self._by_stream: dict = {}   # имя потока → {curve, axis, v, n}
+        for pw, stream in zip(plots, streams):
+            if not stream:
+                continue
+            items = pw.getPlotItem().listDataItems()
+            if not items:
+                continue
+            self._by_stream[stream] = {
+                "curve": items[0],
+                "axis":  getattr(pw, "_time_axis", None),
+                "v": np.empty(0, dtype=np.float64),
+                "n": 0,   # всего отсчётов получено (абсолютный индекс по X)
+            }
+        bus.stream_points.connect(self._on_points)
+
+    def _on_points(self, name: str, times: list, vals: list):
+        ch = self._by_stream.get(name)
+        if ch is None or not vals:
+            return
+        if self._t0 is None:         # привязка нуля оси X к реальному времени старта
+            self._t0 = _time.time()
+            for c in self._by_stream.values():
+                if c["axis"] is not None:
+                    c["axis"].ts_offset = self._t0
+        v = np.asarray(vals, dtype=np.float64)
+        ch["n"] += len(v)
+        ch["v"]  = np.concatenate((ch["v"], v))[-_MAX_POINTS:]
+        # X = индекс отсчёта × шаг (сек от старта); реальное время оси = X + ts_offset
+        idx = np.arange(ch["n"] - len(ch["v"]), ch["n"], dtype=np.float64)
+        ch["curve"].setData(idx * _SAMPLE_DT, ch["v"])
 
 
 def _refresh_values(plots: list):

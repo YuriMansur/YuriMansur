@@ -17,6 +17,7 @@ class UiApp(MainWindow):
 
 
 if __name__ == "__main__":
+    
     multiprocessing.freeze_support()  # нужно для Windows при сборке в exe
 
     app = QApplication(sys.argv)

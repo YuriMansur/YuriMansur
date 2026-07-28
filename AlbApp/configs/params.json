@@ -28,6 +28,19 @@
         "F_su_lower_level": null,
         "F_su_upper_level": null
       }
+    },
+    "P3": {
+      "I": {
+        "Fstab": "50",
+        "Fset": null,
+        "Fsp": null,
+        "F_su_lower_level": "100",
+        "F_su_upper_level": "1202",
+        "Fcr": null,
+        "Fcmin": null,
+        "Fcmax": null,
+        "Fcmean": null
+      }
     }
   },
   "stand_info": {

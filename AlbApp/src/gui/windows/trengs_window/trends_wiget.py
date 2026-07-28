@@ -19,7 +19,9 @@ from ._archive_worker import (
     INFLUX_BUCKET,       # имя bucket в InfluxDB
     LIVE_RENDER_MS,      # интервал таймера скролла live-графика (мс)
     LIVE_WINDOW_SECS,    # глубина отображаемого live-окна (сек)
-    MAX_LIVE_POINTS,     # размер кольцевого буфера live-данных
+    LIVE_POINTS_START,   # стартовая ёмкость live-буфера (темп ещё не известен)
+    LIVE_POINTS_LIMIT,   # потолок ёмкости live-буфера
+    LIVE_POINTS_MARGIN,  # запас ёмкости сверх окна
     N_ARCHIVE_WORKERS,   # количество параллельных потоков загрузки архива
     _ArchiveWorker,      # QThread-воркер одного параллельного запроса к InfluxDB
 )
@@ -156,6 +158,13 @@ class TrendsWiget(QWidget):
         self._auto_scroll: bool  = True
         self._y_range:     tuple = (0.0, 1.0)
         self._ts_offset:   float = 0.0       # нормализация X для OpenGL (вычитается из timestamps)
+        self._live_start_ts: float = 0.0     # момент включения live (левый край до заполнения окна)
+
+        # Ёмкость кольцевых live-буферов. Стартовая — до того, как воркер сообщит
+        # реальный шаг между точками; дальше пересчитывается под окно (см. _on_stream_rate).
+        self._live_cap:       int  = LIVE_POINTS_START
+        self._stream_step_ms: dict = {}      # имя потока → шаг между точками, мс
+        bus.stream_rate.connect(self._on_stream_rate)
 
         # таймер плавного скролла X-оси
         self._render_timer = QTimer(self)
@@ -392,8 +401,8 @@ class TrendsWiget(QWidget):
         self._channels[ch_id] = {
             'curve':        curve,
             'name':         name or f"канал {ch_id}",
-            'buf_t':        np.empty(MAX_LIVE_POINTS, dtype=np.float64),
-            'buf_v':        np.empty(MAX_LIVE_POINTS, dtype=np.float64),
+            'buf_t':        np.empty(self._live_cap, dtype=np.float64),
+            'buf_v':        np.empty(self._live_cap, dtype=np.float64),
             'write':        0,
             'full':         False,
             'color':        color,
@@ -588,6 +597,8 @@ class TrendsWiget(QWidget):
                     self._legend.addItem(ch['curve'], ch['name'])
             self._y_range     = (0.0, 1.0)
             self._auto_scroll = True
+            # момент включения live — к нему прижат левый край, пока окно не заполнилось
+            self._live_start_ts = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() / 1000.0
             vb.disableAutoRange()
             vb.setAutoVisible(y=False)
             self._render_timer.start(LIVE_RENDER_MS)
@@ -632,6 +643,44 @@ class TrendsWiget(QWidget):
 
     # ── live ──────────────────────────────────────────────────────────────────
 
+    def _on_stream_rate(self, name: str, step_ms: float):
+        """Воркер сообщил шаг между точками потока → пересчитать ёмкость буферов.
+
+        Темп задаётся ПЛК (max_array_length) и периодом опроса, поэтому ёмкость
+        считаем от него, а не фиксируем: буфер должен вмещать всё окно
+        LIVE_WINDOW_SECS, иначе старая часть графика молча пропадает.
+        Размер берём по самому быстрому потоку — буферы у каналов общей длины.
+        """
+        if step_ms and step_ms > 0:
+            self._stream_step_ms[name] = step_ms
+        if not self._stream_step_ms:
+            return
+        fastest = min(self._stream_step_ms.values())
+        need    = int(LIVE_WINDOW_SECS * 1000 / fastest * LIVE_POINTS_MARGIN)
+        self._set_live_capacity(max(1000, min(need, LIVE_POINTS_LIMIT)))
+
+    def _set_live_capacity(self, cap: int):
+        """Расширить кольцевые буферы каналов до ёмкости cap.
+
+        Только увеличиваем: измеренный темп слегка плавает, и сжатие на каждом
+        колебании выбрасывало бы часть уже накопленного графика. Накопленное
+        содержимое переносится, чтобы расширение не сбрасывало живую кривую.
+        """
+        if cap <= self._live_cap:
+            return
+        self._live_cap = cap
+        for ch_id, ch in self._channels.items():
+            x, y = self._get_buf_data(ch_id)      # текущее содержимое по порядку
+            buf_t = np.empty(cap, dtype=np.float64)
+            buf_v = np.empty(cap, dtype=np.float64)
+            n = min(len(x), cap)
+            if n:
+                buf_t[:n] = x[-n:]
+                buf_v[:n] = y[-n:]
+            ch['buf_t'], ch['buf_v'] = buf_t, buf_v
+            ch['write'] = n % cap
+            ch['full']  = n == cap
+
     def _push_points(self, ch_id: int, times: list, values: list):
         """Записать точки в кольцевой буфер канала и обновить кривую."""
         if self._mode != "live":
@@ -645,7 +694,7 @@ class TrendsWiget(QWidget):
             w = ch['write']
             buf_t[w] = t
             buf_v[w] = v
-            ch['write'] = (w + 1) % MAX_LIVE_POINTS
+            ch['write'] = (w + 1) % len(buf_t)
             if ch['write'] == 0:
                 ch['full'] = True
         if values:
@@ -672,7 +721,14 @@ class TrendsWiget(QWidget):
         # Нормализация X: вычитаем ts_offset чтобы OpenGL работал с малыми числами
         # (float32 имеет точность ±256 сек на значении ~1.7e9 — видимая вибрация)
         if self._auto_scroll:
-            self._ts_offset = now_ts - LIVE_WINDOW_SECS
+            # Пока окно не заполнилось, левый край прижат к моменту включения live —
+            # перо идёт слева направо, как на самописце. Когда данные дошли до правого
+            # края, окно начинает ехать за now. Ось хронологическая в обоих случаях:
+            # слева старое, справа новое (раньше левый край всегда был now-300, поэтому
+            # свежий график строился от правого края влево).
+            self._ts_offset = (self._live_start_ts
+                               if now_ts - self._live_start_ts < LIVE_WINDOW_SECS
+                               else now_ts - LIVE_WINDOW_SECS)
             self._time_axis.ts_offset = self._ts_offset
             self.plot_widget.setXRange(0, LIVE_WINDOW_SECS, padding=0)
 
@@ -718,7 +774,7 @@ class TrendsWiget(QWidget):
         for ch in self._channels.values():
             if not ch['visible']:
                 continue
-            n = MAX_LIVE_POINTS if ch['full'] else ch['write']
+            n = len(ch['buf_v']) if ch['full'] else ch['write']
             if n > 0:
                 all_y.append(ch['buf_v'][:n])
         if not all_y:

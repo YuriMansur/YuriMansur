@@ -2,10 +2,12 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QScrollArea, QPushButton, QLineEdit, QDialog,
 )
-from PyQt6.QtCore import pyqtSignal, QTimer, Qt, QPoint
-from PyQt6.QtGui import QPainter, QColor, QPolygon
+from PyQt6.QtCore import pyqtSignal, QTimer, Qt, QPoint, QSize
+from PyQt6.QtGui import QPainter, QColor, QPolygon, QIcon
 
-from tag_binder import tags   # запись/чтение тегов ПЛК по имени из servers.json
+from tag_binder import tags, link   # теги ПЛК по имени + состояние связи с ПЛК
+from gui.icons import make_icon      # значки статусов рисуются кодом (см. gui/icons.py)
+from event_bus import bus     # живые значения потоков/тегов для карточек (cards)
 
 
 def _defer(fn) -> None:
@@ -462,41 +464,87 @@ class _HeaderFrame(QFrame):
         super().__init__(parent)
         self._meta = None        # сворачиваемый блок метаданных
         self._min_full = 0       # минимальная ширина, при которой блок показываем
+        self._elide: list = []   # [(метка, полный текст)] — ужимаем многоточием
+        self._eliding = False    # защита от рекурсии: setText → layout → resizeEvent
 
     def set_collapsible(self, meta, min_full: int):
         self._meta = meta
         self._min_full = min_full
         self._update_meta()
 
+    def set_elided(self, pairs: list):
+        """Метки, которые надо ужимать многоточием под текущую ширину.
+
+        Высота шапки фиксирована, поэтому переносить текст нельзя — не влезет
+        и обрежется. Вместо переноса укорачиваем строку, полный текст остаётся
+        в подсказке.
+        """
+        self._elide = pairs
+        self._update_elide()
+
     def _update_meta(self):
         if self._meta is not None:
             self._meta.setVisible(self.width() >= self._min_full)
 
+    def _update_elide(self):
+        if self._eliding or not self._elide:
+            return
+        from PyQt6.QtGui import QFontMetrics
+        self._eliding = True
+        try:
+            for lbl, full in self._elide:
+                fm = QFontMetrics(lbl.font())
+                lbl.setText(fm.elidedText(full, Qt.TextElideMode.ElideRight,
+                                          max(0, lbl.width())))
+                lbl.setToolTip(full)
+        finally:
+            self._eliding = False
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._update_meta()
+        self._update_elide()
+        # ещё раз следующим тиком: в момент resize метки внутри шапки ещё не
+        # получили финальную ширину, и обрезать было бы не по чему
+        _defer(self._update_elide)
 
 
 class _CyclicWizard(QWidget):
     """Пошаговый мастер испытания: шаги из PROCEDURES, стиль из темы приложения."""
     started = pyqtSignal(bool)
 
-    def __init__(self, gost: str, method: str, start_index=None, parent=None):
+    def __init__(self, gost: str, method: str, state: dict | None = None, parent=None):
         super().__init__(parent)
         _refresh_wz()
         self._gost   = gost
         self._method = method
         self._items: list[_StepItem] = []
         self._previewing = False   # True — показан просмотр другого (пройденного) шага
+        self._step_locked = False  # True — шаг выполнен: поля и кнопки шага закрыты
         # значения полей form-шагов: {step_id: {field_key: value, "__fixture__": ..., "__decision__": ...}}
         self._form_values: dict[str, dict] = {}
         # флаги, выставляемые опциями decision (например, passed для протокола)
         self._flags: dict = {}
         self._sample_info_provider = None   # callable → dict «инфо об образце» (сек.2)
         self._jump_target = None    # индекс шага, на который указывает стрелка «→»
+        # Живые значения для карточек cards (как окошко в секции 4): кэш «имя→последнее
+        # значение» наполняется одной постоянной подпиской на шину, а таймер обновляет
+        # только видимые сейчас карточки (список пересобирается при каждом рендере шага —
+        # так подписки не копятся и не ссылаются на удалённые QLabel).
+        self._live_last: dict = {}     # имя потока/тега → последнее значение
+        self._live_cards: list = []    # [{label, src, fmt, unit}] — карточки текущего шага
+        bus.stream_points.connect(self._on_live_points)   # tenza/displacement/setpoint
+        bus.tag_state.connect(self._on_live_tag)           # скалярные теги (nowSetpoint…)
+        # метки плиток шага инициализации — пока этот шаг отрисован, иначе None;
+        # подписки одни на визард, как у живых карточек
+        self._link_icon = None
+        self._alarm_icon = None
+        self._status_btns: dict = {}   # ключ статуса → кнопка-иконка в шапке
+        self._nav_btns: list = []      # кнопки перехода текущего шага
+        link.changed.connect(self._on_link)
         self._build_steps()
-        if start_index is not None:   # восстановление позиции при смене темы
-            self._current = max(0, min(start_index, len(self._steps) - 1))
+        if state:                     # перенос прогресса при пересборке (смена темы)
+            self._restore_state(state)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -534,13 +582,36 @@ class _CyclicWizard(QWidget):
         root.addLayout(body, 1)
 
         self._refresh_sidebar()
+        if state:                     # бейджи — поверх пересчитанных по self._current
+            self._restore_badges(state["badges"])
+
+        # таймер обновления живых карточек (значение + подпись) текущего шага
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(200)
+        self._live_timer.timeout.connect(self._refresh_live_cards)
+        self._live_timer.start()
+
         self._render_step(self._current)
 
     # ── формирование шагов ─────────────────────────────────────────────────
     # Нулевой шаг инициализации — общий для всех методик (добавляется первым).
-    _INIT_STEP = {"id": "__init__", "group": "ИНИЦИАЛИЗАЦИЯ",
-                  "title": "Инициализация оборудования",
-                  "sub": "Включение и проверки исправности", "kind": "init"}
+    # Нулевой шаг — пуск испытания. Содержимого нет: только кнопка, которая
+    # взводит на ПЛК признак «испытание идёт» (commands[EXPERIMENT_RUN] = TRUE).
+    _START_STEP = {"id": "__start__", "group": "НАЧАЛО",
+                   "title": "Начало испытания",
+                   "sub": "Запуск испытания", "kind": "start",
+                   "button": "▶ Начать испытание",
+                   "start_tag": "cmdExperimentRun", "start_value": 1}
+
+    # Теги команд испытания на ПЛК. Пуск задан в самом шаге (start_tag выше),
+    # завершение и прерывание отправляются кнопками мастера.
+    _END_TAG   = "cmdExperimentEnd"      # ✓ Завершить испытание
+    _ABORT_TAG = "cmdExperimentAbort"    # ⛔ Прервать
+
+    # Группы, на которых испытание ещё не идёт. Только нулевой шаг: как только
+    # нажата «Начать испытание» (commands[EXPERIMENT_RUN] = TRUE), испытание идёт —
+    # сек.2 блокирует выбор ГОСТ/методики, сек.1 — ручное управление стендом.
+    _IDLE_GROUPS = ("НАЧАЛО",)
 
     def _build_steps(self):
         data = (_load_methodic(self._gost, self._method)
@@ -556,8 +627,37 @@ class _CyclicWizard(QWidget):
             proc = PROCEDURES.get((self._gost, self._method))
             self._htitle, self._steps = _steps_from_procedure(proc or _DEFAULT_PROCEDURE)
             self._current = 0
-        # нулевой шаг инициализации — первым во всех методиках
-        self._steps.insert(0, dict(self._INIT_STEP))
+        # нулевой шаг пуска — первым во всех методиках
+        self._steps.insert(0, dict(self._START_STEP))
+
+    # ── перенос прогресса между экземплярами (пересборка при смене темы) ────
+    def export_state(self) -> dict:
+        """Снимок прогресса: шаги, введённые оператором значения, флаги, позиция."""
+        return {
+            # шаги — со всеми вставленными по ходу вложенными под-шагами
+            "steps":       [dict(s) for s in self._steps],
+            "current":     self._current,
+            "form_values": {k: dict(v) for k, v in self._form_values.items()},
+            "flags":       dict(self._flags),
+            "jump_target": self._jump_target,
+            # состояния бейджей — иначе «прерванный» протокол пометит пройденными
+            # и те шаги, которые были пропущены
+            "badges":      [it._state for it in self._items],
+        }
+
+    def _restore_state(self, state: dict) -> None:
+        """Восстановить прогресс из снимка. Вызывается до построения степпера:
+        шаги из снимка уже содержат выбранные ранее вложенные под-шаги."""
+        self._steps       = [dict(s) for s in state["steps"]]
+        self._form_values = {k: dict(v) for k, v in state["form_values"].items()}
+        self._flags       = dict(state["flags"])
+        self._jump_target = state["jump_target"]
+        self._current     = max(0, min(state["current"], len(self._steps) - 1))
+
+    def _restore_badges(self, badges: list) -> None:
+        """Вернуть состояния бейджей степпера (после его построения)."""
+        for item, st in zip(self._items, badges):
+            item.set_state(st)
 
     # ── шапка ──────────────────────────────────────────────────────────────
     def _build_header(self) -> QFrame:
@@ -574,12 +674,26 @@ class _CyclicWizard(QWidget):
 
         icon = QLabel()
         icon.setPixmap(_make_activity_icon(34))
-        title = QLabel(
-            f"<span style='color:{_WZ['title']}; font-weight:bold;'>{self._gost} — {self._method}</span>"
-            f"<br><span style='color:{_WZ['muted']}; font-size:11px;'>{self._htitle}</span>")
-        title.setWordWrap(True)
+
+        # Две отдельные строки вместо одной с переносом: высота шапки фиксирована,
+        # и перенесённый текст просто обрезался бы. Длинные строки ужимаются
+        # многоточием (см. _HeaderFrame.set_elided), полный текст — в подсказке.
+        head = QWidget()
+        hv = QVBoxLayout(head)
+        hv.setContentsMargins(0, 0, 0, 0)
+        hv.setSpacing(1)
+        l_name = QLabel()
+        l_name.setStyleSheet(f"color: {_WZ['title']}; font-weight: bold; background: transparent;")
+        l_sub = QLabel()
+        l_sub.setStyleSheet(f"color: {_WZ['muted']}; font-size: 11px; background: transparent;")
+        for l in (l_name, l_sub):
+            l.setWordWrap(False)
+            l.setMinimumWidth(1)     # не диктует ширину шапки — ужимается
+            hv.addWidget(l)
+
         lay.addWidget(icon, 0)
-        lay.addWidget(title, 1)
+        lay.addWidget(head, 1)
+        f.set_elided([(l_name, f"{self._gost} — {self._method}"), (l_sub, self._htitle)])
 
         # метаданные сессии — один компактный блок (разделители внутри, чтобы
         # не раздувать ширину шапки и не вылезать за границу секции)
@@ -603,15 +717,31 @@ class _CyclicWizard(QWidget):
         # метаданные показываем только когда шапке хватает ширины; иначе
         # сворачиваем, чтобы «Прервать» и заголовок не уходили за границу секции
         meta.adjustSize()
-        f.set_collapsible(meta, meta.sizeHint().width() + 320)
+        # + место под иконки статусов, иначе блок метаданных не свернётся вовремя
+        f.set_collapsible(meta, meta.sizeHint().width() + 320 + 3 * self._ICON_BOX)
 
         # кнопка прерывания испытания — доступна на каждом шаге
-        btn_stop = QPushButton("⛔ Прервать")
+        # статусы оборудования — слева от «Прервать», на виду весь ход испытания;
+        # зазор отделяет индикаторы от кнопки, чтобы не читались одним блоком
+        lay.addWidget(self._status_row(), 0)
+        lay.addSpacing(18)
+
+        # «Прервать» — тоже иконкой, в один ряд со статусами: подпись съедала
+        # ширину, из-за которой заголовок не помещался в шапку
+        btn_stop = QPushButton()
+        btn_stop.setObjectName("wzStop")
+        btn_stop.setIcon(QIcon(make_icon("stop", "#ffffff", self._ICON_PX)))
+        btn_stop.setIconSize(QSize(self._ICON_PX, self._ICON_PX))
+        btn_stop.setFixedSize(self._ICON_BOX, self._ICON_BOX)
+        btn_stop.setToolTip("Прервать испытание")
         btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Залита красным с рамкой: рядом стоят плоские иконки статусов, и без
+        # заливки кнопка читалась бы как ещё один индикатор, а не как действие.
         btn_stop.setStyleSheet(
-            f"QPushButton {{ background: {_WZ['red']}; color: white; border: none;"
-            " border-radius: 6px; padding: 6px 14px; font-weight: bold; }"
-            " QPushButton:hover { background: #e74c3c; }")
+            f"QPushButton#wzStop {{ background: {_WZ['red']}; border: 1px solid {_WZ['red']};"
+            " border-radius: 6px; }"
+            " QPushButton#wzStop:hover { background: #e74c3c; border-color: #e74c3c; }"
+            " QPushButton#wzStop:pressed { background: #a93226; border-color: #a93226; }")
         btn_stop.clicked.connect(self._interrupt_test)
         lay.addWidget(btn_stop, 0)
         return f
@@ -735,7 +865,7 @@ class _CyclicWizard(QWidget):
         self._refresh_sidebar()
         self._render_step(idx)
         # испытание считается «идущим» вне групп подготовки → блок комбобоксов сек.2
-        self.started.emit(self._steps[idx]["group"] not in ("ПОДГОТОВКА", "ИНИЦИАЛИЗАЦИЯ"))
+        self.started.emit(self._steps[idx]["group"] not in self._IDLE_GROUPS)
 
     def _interrupt_test(self):
         """Кнопка «Прервать» — крупный стилизованный диалог подтверждения."""
@@ -794,6 +924,9 @@ class _CyclicWizard(QWidget):
         root.addLayout(btns)
 
         if dlg.exec() == QDialog.DialogCode.Accepted:
+            # ПЛК сообщаем именно о прерывании; _abort_test() ниже только сбрасывает
+            # состояние мастера и переиспользуется завершением — команды там нет
+            tags.write(self._ABORT_TAG, 1)   # commands[EXPERIMENT_ABORT] = TRUE
             self._abort_test()
 
     def _abort_test(self):
@@ -803,6 +936,7 @@ class _CyclicWizard(QWidget):
         self._jump_target = None
         self._build_steps()       # перечитать шаги из конфига (убрать вложенные под-шаги)
         self._rebuild_sidebar()
+        self._sync_status_icons() # шапка не пересобирается — снимаем отметки вручную
         self._goto(0)
 
     def _goto_protocol_interrupted(self):
@@ -820,7 +954,7 @@ class _CyclicWizard(QWidget):
         if self._items:
             active = self._items[proto]
             _defer(lambda: self._side_scroll.ensureWidgetVisible(active, 0, 40))
-        self.started.emit(self._steps[proto]["group"] not in ("ПОДГОТОВКА", "ИНИЦИАЛИЗАЦИЯ"))
+        self.started.emit(self._steps[proto]["group"] not in self._IDLE_GROUPS)
 
     @staticmethod
     def _clear(lay):
@@ -853,6 +987,9 @@ class _CyclicWizard(QWidget):
 
     def _render_step(self, idx: int, preview: bool = False):
         self._clear(self._content)
+        self._live_cards = []      # карточки прошлого шага удалены _clear — забываем их
+        self._nav_btns = []        # ­— то же для кнопок перехода (их блокируют статусы)
+        self._step_locked = False  # снимается на каждом шаге; ставит _render_form
         self._previewing = preview
         self._set_preview_highlight(idx if preview else None)
         step = self._steps[idx]
@@ -873,8 +1010,8 @@ class _CyclicWizard(QWidget):
         badge_row.addStretch()
         self._content.addLayout(badge_row)
 
-        if step["kind"] == "init":
-            self._render_init(step)
+        if step["kind"] == "start":
+            self._render_start(step)
         elif step["kind"] == "form":
             self._render_form(step)
         elif step["kind"] == "stab":
@@ -903,6 +1040,8 @@ class _CyclicWizard(QWidget):
         if finish:
             primary.clicked.connect(lambda: self._goto(0))
         else:
+            # только переход: действия шага выполняют кнопки в его теле (они шлют
+            # свой tag и остаются на месте), навигация ничего на ПЛК не пишет
             primary.clicked.connect(lambda: self._goto(self._current + 1))
         nav.addWidget(primary, 1)
         return nav
@@ -922,7 +1061,7 @@ class _CyclicWizard(QWidget):
         if bt == "button":
             row = QHBoxLayout()
             b = self._btn(blk["text"])
-            b.setEnabled(not self._previewing)
+            b.setEnabled(not self._read_only)
             # кнопка с полем "tag" сама пишет на ПЛК (значение из "value", по
             # умолчанию 1) — движок понимает из конфига, что слать
             tag = blk.get("tag")
@@ -959,12 +1098,20 @@ class _CyclicWizard(QWidget):
                 row.addLayout(self._input(it["label"], store[key], self._form_setter(store, key)), 1)
             c.addLayout(row)
         elif bt == "cards":
-            # информационные плитки (значение + подпись); цвет — имя из палитры
+            # информационные плитки (значение + подпись); цвет — имя из палитры.
+            # Опц. "tag"/"stream" — живой источник (tenza/displacement/setpoint/скаляр):
+            # значение обновляется в реальном времени, как окошко в секции 4.
             row = QHBoxLayout()
             row.setSpacing(8)
             for it in blk["items"]:
                 col = accents.get(it.get("color")) or _WZ.get(it.get("color", "title"), _WZ["title"])
-                row.addWidget(self._card(it.get("value", "—"), col, it.get("caption", "")), 1)
+                card = self._card(it.get("value", "—"), col, it.get("caption", ""))
+                src = it.get("tag") or it.get("stream")
+                if src:
+                    self._live_cards.append({"label": card._val, "src": src,
+                                             "fmt": it.get("fmt", ".1f"),
+                                             "unit": it.get("unit", "")})
+                row.addWidget(card, 1)
             c.addLayout(row)
         elif bt == "fixture":
             self._render_form_fixture(c, store, blk.get("question", "Использовалось специальное приспособление?"))
@@ -975,7 +1122,7 @@ class _CyclicWizard(QWidget):
             b = self._toggle_btn(blk["text"])
             b.setChecked(on)
             self._style_one_toggle(b, on)
-            b.setEnabled(not self._previewing)
+            b.setEnabled(not self._read_only)
             b.clicked.connect(lambda _c=False, k=key: self._toggle_flag(store, k))
             row.addWidget(b, 0)
             row.addStretch()
@@ -988,9 +1135,17 @@ class _CyclicWizard(QWidget):
         store[key] = not store.get(key)
         self._rerender_keep_scroll()
 
+    @property
+    def _read_only(self) -> bool:
+        """Ввод закрыт: смотрим чужой шаг либо текущий уже выполнен."""
+        return self._previewing or self._step_locked
+
     def _render_form(self, step: dict):
         c = self._content
         store = self._form_values.setdefault(step.get("id", step["title"]), {})
+        # выполненный шаг закрыт на правку до нажатия «Повторить» (см. _exec_nav);
+        # ставим до отрисовки тела — блоки читают признак через _read_only
+        self._step_locked = bool(store.get("__executed__"))
 
         h = QLabel(step.get("title", ""))
         h.setWordWrap(True)
@@ -1005,7 +1160,51 @@ class _CyclicWizard(QWidget):
             self._render_decision(step, store, dec)
         else:
             c.addStretch()
-            c.addLayout(self._step_nav("Далее →"))
+            c.addLayout(self._exec_nav(step, store))
+
+    # ── кнопки шага: выполнение → повтор / переход ─────────────────────────
+    def _exec_nav(self, step: dict, store: dict) -> QVBoxLayout:
+        """Тумблер выполнения шага и, для выполненного шага, переход дальше.
+
+        Отжат — «Выполнить шаг»: поля и кнопки шага доступны. Нажат — «Повторить»:
+        шаг выполнен, его поля и кнопки закрыты, рядом появляется «Следующий шаг».
+        Повторное нажатие открывает шаг заново. Выполнение никуда не перекидывает:
+        оператор сам решает, переделать шаг или идти дальше.
+
+        Признак живёт в значениях шага, поэтому сохраняется при возврате к шагу
+        и переносится при смене темы, а «Прервать» его сбрасывает.
+        """
+        if self._previewing:
+            return self._step_nav("Следующий шаг")   # в просмотре — только возврат
+
+        done = bool(store.get("__executed__"))
+        # кнопки друг под другом на всю ширину — в узкой колонке надписи целиком
+        col = QVBoxLayout()
+        col.setSpacing(8)
+
+        tgl = self._toggle_btn("🔁 Повторить" if done else "Выполнить шаг")
+        self._style_one_toggle(tgl, done)
+        tgl.clicked.connect(lambda _c=False: self._toggle_exec(step, store))
+        col.addWidget(tgl)
+
+        if done:
+            nxt = self._btn("Следующий шаг", primary=True)
+            nxt.clicked.connect(lambda: self._goto(self._current + 1))
+            col.addWidget(self._register_nav(nxt))
+        return col
+
+    def _toggle_exec(self, step: dict, store: dict):
+        """Переключить состояние шага: выполнить (команда на ПЛК + блокировка
+        полей) либо снять выполнение по «Повторить» — тогда поля и кнопки шага
+        снова доступны, а команда уйдёт заново при следующем «Выполнить шаг»."""
+        if store.get("__executed__"):
+            store["__executed__"] = False
+        else:
+            tag = step.get("tag")
+            if tag is not None:
+                tags.write(tag, step.get("value", 1))
+            store["__executed__"] = True
+        self._rerender_keep_scroll()
 
     # ── интерпретатор ветвления «decision» (вопрос + варианты, вложенность) ─
     def _resolve_target(self, goto) -> int:
@@ -1091,7 +1290,7 @@ class _CyclicWizard(QWidget):
         nav = QHBoxLayout()
         btn = self._btn(opt.get("button", "Далее →"), primary=True)
         btn.clicked.connect(lambda _c=False, o=opt, t=target: self._decision_go(o, t))
-        nav.addWidget(btn, 1)
+        nav.addWidget(self._register_nav(btn), 1)
         c.addLayout(nav)
 
     def _decision_go(self, opt: dict, target: int):
@@ -1118,8 +1317,8 @@ class _CyclicWizard(QWidget):
 
         yes.clicked.connect(lambda _c=False: set_fix(True))
         no.clicked.connect(lambda _c=False: set_fix(False))
-        yes.setEnabled(not self._previewing)
-        no.setEnabled(not self._previewing)
+        yes.setEnabled(not self._read_only)
+        no.setEnabled(not self._read_only)
         toggle.addWidget(yes, 1)
         toggle.addWidget(no, 1)
         c.addLayout(toggle)
@@ -1153,9 +1352,11 @@ class _CyclicWizard(QWidget):
 
     def _finish_test(self):
         """Завершение испытания: создать папку испытания с Протоколом и Журналом,
-        затем завершить алгоритм (сброс мастера к началу для нового образца)."""
+        сообщить ПЛК о завершении и завершить алгоритм (сброс мастера к началу
+        для нового образца)."""
         if not self._create_test_docs():
             return                       # документы не созданы — мастер не сбрасываем
+        tags.write(self._END_TAG, 1)     # commands[EXPERIMENT_END] = TRUE
         self._abort_test()               # завершение алгоритма: сброс состояния и шагов
 
     def _create_test_docs(self) -> bool:
@@ -1189,37 +1390,193 @@ class _CyclicWizard(QWidget):
                 f"Документы созданы:\n{folder}\n\nНо открыть папку не удалось:\n{e}")
         return True
 
-    # ── нулевой шаг: инициализация оборудования ─────────────────────────────
-    def _render_init(self, step: dict):
+    # ── нулевой шаг: пуск испытания (без содержимого — только кнопка) ───────
+    def _render_start(self, step: dict):
         c = self._content
-        h = QLabel(step.get("title", "Инициализация оборудования"))
+        h = QLabel(step.get("title", "Начало испытания"))
         h.setWordWrap(True)
         h.setStyleSheet(f"color: {_WZ['title']}; font-size: 18px; font-weight: bold; background: transparent;")
         c.addWidget(h)
 
-        note = QLabel("Включение оборудования и внутренние проверки исправности перед началом испытания.")
-        note.setWordWrap(True)
-        note.setStyleSheet(
-            f"background: {_WZ['card_bg']}; color: {_WZ['text']};"
-            f" border-left: 3px solid {_WZ['blue']}; border-radius: 4px; padding: 8px 12px;")
-        c.addWidget(note)
-
-        # плитки внутренних проверок (заглушки — позже статусы от оборудования)
-        checks = QHBoxLayout()
-        checks.setSpacing(8)
-        for cap in ("Питание", "Связь с ПЛК", "Датчики"):
-            checks.addWidget(self._card("—", _WZ['muted'], cap), 1)
-        c.addLayout(checks)
-
         c.addStretch()
+        c.addLayout(self._start_nav(step))
+
+    def _start_nav(self, step: dict) -> QHBoxLayout:
+        """Кнопка пуска шага (пуск испытания / инициализация оборудования).
+        Надпись и отправляемый тег берутся из самого шага; в режиме просмотра
+        вместо пуска — обычная навигация."""
         if self._previewing:
-            c.addLayout(self._step_nav("Далее →"))
-            return
+            return self._step_nav("Далее →")
         nav = QHBoxLayout()
-        btn = self._btn("▶ Начать испытание", primary=True)
+        btn = self._btn(step.get("button", "▶ Начать испытание"), primary=True)
         btn.clicked.connect(self._start_test)
         nav.addWidget(btn, 1)
-        c.addLayout(nav)
+        return nav
+
+    # ── статусы оборудования (в шапке, рядом с «Прервать») ──────────────────
+    def _status_row(self) -> QWidget:
+        """Три иконки состояния: питание, связь с ПЛК, датчики.
+
+        Живут в шапке мастера, а не внутри шага: состояние относится к стенду,
+        а не к конкретному шагу, и должно быть на виду всё испытание. Строятся
+        один раз на визард — шаги их не пересоздают.
+
+        Питание и датчики подтверждает оператор (отдельных сигналов об их
+        исправности ПЛК не отдаёт), связь берётся из состояния OPC-сессии.
+        Состояние общее на всё испытание (ключ __status__ в значениях мастера):
+        переносится при смене темы и сбрасывается «Прервать». Подписей нет —
+        пояснение всплывает при наведении.
+        """
+        w = QWidget()
+        row = QHBoxLayout(w)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(2)
+        row.addWidget(self._check_icon(
+            "__power__", "power",
+            "Питание включено", "Питание: не подтверждено"))
+        self._link_icon = QLabel()
+        self._link_icon.setFixedSize(self._ICON_BOX, self._ICON_BOX)
+        self._link_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(self._link_icon)
+        self._on_link(link.state)                # связь — сразу, не дожидаясь события
+        row.addWidget(self._check_icon(
+            "__sensors__", "sensor",
+            "Датчики исправны", "Датчики: не подтверждено"))
+        # авария — не кликается: состояние приходит тегом с ПЛК
+        self._alarm_icon = QLabel()
+        self._alarm_icon.setFixedSize(self._ICON_BOX, self._ICON_BOX)
+        self._alarm_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(self._alarm_icon)
+        self._refresh_alarm_icon()
+        return w
+
+    # состояние связи → (текст подсказки, цвет из палитры визарда)
+    _LINK_VIEW = {
+        link.UP:           ("Связь с ПЛК: есть",              "green"),
+        link.DOWN:         ("Связь с ПЛК: нет",               "red"),
+        link.RECONNECTING: ("Связь с ПЛК: переподключение…",  "amber"),
+        link.UNKNOWN:      ("Связь с ПЛК: состояние неизвестно", "muted"),
+    }
+
+    _ICON_PX = 24        # размер иконки статуса
+    _ICON_BOX = 34       # размер кликабельной области под ней
+
+    # Группы, где стенд под нагрузкой: идти дальше можно только с подтверждённым
+    # оборудованием. На подготовке и в завершении блокировки нет.
+    _LOAD_GROUPS = ("НАГРУЖЕНИЕ", "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ")
+    _LOCK_TIP = ("Подтвердите питание и датчики в шапке "
+                 "и дождитесь связи с ПЛК")
+
+    def _status_ready(self) -> bool:
+        """Оборудование готово: питание и датчики отмечены, связь с ПЛК есть."""
+        store = self._status_store()
+        return (bool(store.get("__power__")) and bool(store.get("__sensors__"))
+                and link.state == link.UP)
+
+    def _nav_blocked(self) -> bool:
+        """Переход к следующему шагу запрещён (нагружение без готовности стенда)."""
+        if not (0 <= self._current < len(self._steps)):
+            return False
+        return (self._steps[self._current]["group"] in self._LOAD_GROUPS
+                and not self._status_ready())
+
+    def _register_nav(self, btn: QPushButton) -> QPushButton:
+        """Взять кнопку перехода под блокировку статусов (см. _refresh_nav_lock)."""
+        self._nav_btns.append(btn)
+        blocked = self._nav_blocked()
+        btn.setEnabled(not blocked)
+        btn.setToolTip(self._LOCK_TIP if blocked else "")
+        return btn
+
+    def _refresh_nav_lock(self):
+        """Обновить доступность кнопок перехода — по отметкам статусов и связи.
+
+        Шапка живёт отдельно от шага, поэтому клик по иконке статуса не
+        перерисовывает шаг: правим доступность кнопок на месте, без мигания.
+        """
+        blocked = self._nav_blocked()
+        for b in self._nav_btns:
+            try:
+                b.setEnabled(not blocked)
+                b.setToolTip(self._LOCK_TIP if blocked else "")
+            except RuntimeError:
+                pass          # кнопка прошлого шага уже удалена — пропускаем
+
+    def _status_store(self) -> dict:
+        """Значения статусов оборудования. Ищем каждый раз заново: _abort_test
+        заменяет _form_values целиком, и захваченная ссылка стала бы висячей."""
+        return self._form_values.setdefault("__status__", {})
+
+    def _sync_status_icons(self):
+        """Привести иконки статусов к текущим значениям (после сброса мастера)."""
+        store = self._status_store()
+        for key, b in self._status_btns.items():
+            b.setChecked(bool(store.get(key)))
+
+    def _check_icon(self, key: str, kind: str,
+                    tip_on: str, tip_off: str) -> QPushButton:
+        """Статус-иконка ручной проверки: без рамки и подписи, только значок.
+
+        Клик переключает состояние (зелёная / приглушённая), пояснение всплывает
+        при наведении. Состояние живёт в значениях мастера, поэтому переносится
+        при смене темы и сбрасывается «Прервать».
+        """
+        b = QPushButton()
+        b.setCheckable(True)
+        b.setChecked(bool(self._status_store().get(key)))
+        b.setFixedSize(self._ICON_BOX, self._ICON_BOX)
+        b.setIconSize(QSize(self._ICON_PX, self._ICON_PX))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            "QPushButton { border: none; background: transparent; }"
+            f" QPushButton:hover {{ background: {_WZ['card_bg']}; border-radius: 6px; }}")
+        # доступна всегда: статус стенда не зависит от того, какой шаг открыт
+
+        def _sync(on: bool):
+            b.setIcon(QIcon(make_icon(
+                kind, _WZ['green'] if on else _WZ['muted'], self._ICON_PX)))
+            b.setToolTip(tip_on if on else tip_off)
+
+        _sync(b.isChecked())
+        b.toggled.connect(_sync)
+        b.toggled.connect(lambda on, k=key: self._status_store().__setitem__(k, on))
+        b.toggled.connect(lambda _on: self._refresh_nav_lock())
+        self._status_btns[key] = b
+        return b
+
+    # тег аварии с ПЛК и вид иконки по его значению
+    _ALARM_TAG = "general_fault"
+    _ALARM_VIEW = {
+        False: ("green", "Аварий нет"),
+        True:  ("muted", "Авария на стенде"),
+        None:  ("muted", "Авария: состояние неизвестно"),
+    }
+
+    def _refresh_alarm_icon(self):
+        """Иконка «отсутствие аварии»: зелёная, пока тега аварии нет.
+
+        Не кликается — значение приходит с ПЛК тегом general_fault: при аварии
+        иконка гаснет.
+        """
+        if self._alarm_icon is None:
+            return
+        # значение берём из кэша биндера, а не из своего _live_last: визард
+        # пересоздаётся при смене темы и методики, и его кэш каждый раз пуст —
+        # тег приходит по изменению и второй раз может не прийти вовсе
+        val = tags.last(self._ALARM_TAG)
+        color, tip = self._ALARM_VIEW[None if val is None else bool(val)]
+        self._alarm_icon.setPixmap(make_icon("alarm", _WZ[color], self._ICON_PX))
+        self._alarm_icon.setToolTip(tip)
+
+    def _on_link(self, state: str, _server: str = ""):
+        """Перекрасить иконку связи и обновить её подсказку. Шаг инициализации
+        общий для всех методик, поэтому индикатор появляется в каждой из них."""
+        if self._link_icon is None:
+            return                      # отрисован не шаг инициализации — обновлять нечего
+        tip, color = self._LINK_VIEW.get(state, self._LINK_VIEW[link.UNKNOWN])
+        self._link_icon.setPixmap(make_icon("link", _WZ[color], self._ICON_PX))
+        self._link_icon.setToolTip(tip)
+        self._refresh_nav_lock()        # связь пропала → переход снова закрыт
 
     def _start_test(self):
         """Начать испытание: если в шаге задан start_tag — отправить его на ПЛК
@@ -1367,7 +1724,7 @@ class _CyclicWizard(QWidget):
         # ширину панели и не вылезал за правый край
         e.setMinimumWidth(40)
         # пройденный (не текущий) шаг открыт только для просмотра — править нельзя
-        e.setReadOnly(self._previewing)
+        e.setReadOnly(self._read_only)
         if on_change is not None:
             e.textChanged.connect(on_change)
         e.setStyleSheet(
@@ -1383,21 +1740,52 @@ class _CyclicWizard(QWidget):
         f.setStyleSheet(
             f"QFrame#wzCard {{ background: {_WZ['card_bg']}; border: 1px solid {_WZ['border']};"
             " border-radius: 6px; } QLabel { background: transparent; }")
+        # маленькая мин. ширина — ряд карточек ужимается под ширину панели и не
+        # распирает её (иначе длинное значение сдвигает весь контент за край)
+        f.setMinimumWidth(60)
         lay = QVBoxLayout(f)
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(2)
         v = QLabel(value)
+        v.setWordWrap(True)     # длинное значение переносится, а не тянет карточку вширь
         v.setStyleSheet(f"color: {color}; font-size: 17px; font-weight: bold;")
         cap = QLabel(caption)
         cap.setWordWrap(True)
         cap.setStyleSheet(f"color: {_WZ['muted']}; font-size: 11px;")
         lay.addWidget(v)
         lay.addWidget(cap)
+        f._val = v          # ссылка на метку значения — для живого обновления карточки
         return f
+
+    # ── живые значения карточек (cards с полем "tag"/"stream") ────────────────
+    def _on_live_points(self, name: str, _times: list, vals: list):
+        if vals:                       # поток точек — берём последнее значение батча
+            self._live_last[name] = vals[-1]
+
+    def _on_live_tag(self, name: str, val):
+        self._live_last[name] = val    # скалярный тег (nowSetpoint и т.п.)
+        if name == self._ALARM_TAG:
+            self._refresh_alarm_icon()
+
+    def _refresh_live_cards(self):
+        for lc in self._live_cards:
+            val = self._live_last.get(lc["src"])
+            if val is None:
+                continue
+            try:
+                txt = f"{float(val):{lc['fmt']}}"
+            except (TypeError, ValueError):
+                txt = str(val)
+            if lc["unit"]:
+                txt += f" {lc['unit']}"
+            lc["label"].setText(txt)
 
     def _btn(self, text: str, primary: bool = False) -> QPushButton:
         b = QPushButton(text)
         b.setMinimumHeight(36)
+        # кнопка не должна задавать минимальную ширину панели своей надписью —
+        # в узкой колонке она ужимается, а не выталкивает контент за край
+        b.setMinimumWidth(60)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         if primary:
             b.setStyleSheet(
@@ -1454,14 +1842,16 @@ class Section3Widget(QWidget):
         self._build_wizard()
 
     def set_theme(self, dark: bool):
-        """Перестроить мастер под текущую палитру приложения (вызов из ExperimentWidget)."""
+        """Перестроить мастер под текущую палитру приложения (вызов из ExperimentWidget).
+        Прогресс и введённые оператором значения переносятся в новый экземпляр —
+        смена темы посреди испытания не должна стирать замеры."""
         if self._wizard is None:
             return
-        self._build_wizard(start_index=self._wizard._current)
+        self._build_wizard(state=self._wizard.export_state())
 
-    def _build_wizard(self, start_index=None):
+    def _build_wizard(self, state: dict | None = None):
         """Построить пошаговый мастер для текущей (ГОСТ, методика)."""
-        self._wizard = _CyclicWizard(self._gost, self._method, start_index=start_index)
+        self._wizard = _CyclicWizard(self._gost, self._method, state=state)
         self._wizard._sample_info_provider = self._sample_info_provider
         self._wizard.started.connect(self.started)   # проброс блокировки комбобоксов сек.2
         self._scroll.setWidget(self._wizard)

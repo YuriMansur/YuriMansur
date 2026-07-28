@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
 from PyQt6.QtCore import pyqtSignal
 
-from gui.windows.experiment_window.section1 import _make_section1
+from gui.windows.experiment_window.section1 import _make_section1, set_manual_controls_enabled
 from gui.windows.experiment_window.section2 import Section2Widget
 from gui.windows.experiment_window.section3 import Section3Widget
 from gui.windows.experiment_window.section4 import make_section4
@@ -31,6 +31,9 @@ class ExperimentWidget(QWidget):
         def _on_started(running: bool):
             for w in (sec2.cb_std, sec2.cb_load, sec2.cb_cond, sec2.cb_method):
                 w.setEnabled(not running)
+            # ручное управление стендом на время испытания недоступно
+            if getattr(self, "_sec1", None) is not None:
+                set_manual_controls_enabled(self._sec1, not running)
 
         sec3.started.connect(_on_started)
 
@@ -46,6 +49,7 @@ class ExperimentWidget(QWidget):
 
             if i == 1:
                 sec1, self._btn_alarm_test = _make_section1()
+                self._sec1 = sec1
                 col_layout.addWidget(sec1, 1)
             elif i == 2:
                 col_layout.addWidget(sec2, 1)

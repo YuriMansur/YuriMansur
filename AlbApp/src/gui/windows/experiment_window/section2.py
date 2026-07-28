@@ -111,25 +111,51 @@ class Section2Widget(QWidget):
         self.cb_load = QComboBox()
         form2.addRow("Уровень нагружения:", self.cb_load)
 
+        # Строка условия нужна не всем ГОСТам, но место под неё держим всегда,
+        # иначе при смене ГОСТа всё ниже прыгает. Сама строка — в общей форме,
+        # чтобы колонки совпадали с остальными (во вложенной форме своя ширина
+        # подписей, и комбобокс получался шире прочих). Схлопывание скрытой
+        # строки компенсирует заглушка ниже: retainSizeWhenHidden в QFormLayout
+        # место не удерживает.
         self.cb_cond = QComboBox()
         self._lbl_cond = QLabel("Условие нагружения:")
-        # резервируем место строки даже когда она скрыта — чтобы при ГОСТах
-        # без условия (I/II) ничего ниже не прыгало
-        for w in (self.cb_cond, self._lbl_cond):
-            sp = w.sizePolicy(); sp.setRetainSizeWhenHidden(True); w.setSizePolicy(sp)
         form2.addRow(self._lbl_cond, self.cb_cond)
+
+        self._cond_gap = QLabel()
+        self._cond_gap.setVisible(False)
+        form2.addRow(self._cond_gap)
+
+        # Поля сил живут в отдельной форме фиксированной высоты. Строки скрытых
+        # полей схлопываются, поэтому видимые идут подряд, без пустых промежутков;
+        # высота же блока рассчитана на ГОСТ с наибольшим числом полей, так что
+        # при смене ГОСТа методика и всё, что ниже, остаются на месте.
+        f_host = QWidget()
+        self._form_f = QFormLayout(f_host)
+        self._form_f.setContentsMargins(0, 0, 0, 0)
+        self._form_f.setSpacing(4)
+        self._form_f.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         _F_KEYS = param_config.f_fields()
         self._f_edits  = {}
         self._f_labels = {}
+        # Ширина поля — под число не длиннее пяти знаков; одинаковая у всех полей
+        # и всех ГОСТов, поэтому колонка значений не «дышит» при переключении.
         for key in _F_KEYS:
             le  = QLineEdit(); le.setReadOnly(True)
+            le.setFixedWidth(le.fontMetrics().horizontalAdvance("99999") + 24)
             lbl = QLabel(f"{key}:")
-            sp = le.sizePolicy(); sp.setRetainSizeWhenHidden(True); le.setSizePolicy(sp)
-            sp = lbl.sizePolicy(); sp.setRetainSizeWhenHidden(True); lbl.setSizePolicy(sp)
             self._f_edits[key]  = le
             self._f_labels[key] = lbl
-            form2.addRow(lbl, le)
+            self._form_f.addRow(lbl, le)
+
+        # высота = самый «широкий» ГОСТ; шаг строки считаем из формы со всеми
+        # строками, они одинаковые — деление точное
+        max_rows = max((len(param_config.fields(g)) for g in param_config.gosts()),
+                       default=0)
+        if _F_KEYS and max_rows:
+            row_h = f_host.sizeHint().height() / len(_F_KEYS)
+            f_host.setFixedHeight(round(row_h * max_rows))
+        form2.addRow(f_host)
 
         spacer_lbl = QLabel()
         spacer_lbl.setFixedHeight(8)
@@ -211,6 +237,7 @@ class Section2Widget(QWidget):
         # (retainSizeWhenHidden) — блок остаётся жёстким, ничего не прыгает
         self.cb_cond.setVisible(has_cond)
         self._lbl_cond.setVisible(has_cond)
+        self._sync_cond_height()
 
         self.cb_method.blockSignals(True)
         self.cb_method.clear()
@@ -219,18 +246,34 @@ class Section2Widget(QWidget):
 
         self._refresh_f()
 
+    def _sync_cond_height(self):
+        """Держать место строки условия, когда её у ГОСТа нет.
+
+        Заглушка показывается вместо скрытой строки и повторяет её высоту.
+        Высоту берём у самого комбобокса: тему применяют позже
+        (ExperimentWidget.set_theme задаёт комбобоксам свою высоту), поэтому
+        зафиксировать её на старте нельзя — строка обрезалась бы.
+        """
+        # isVisibleTo, а не isVisible: на старте виджет ещё не показан, и
+        # isVisible() дал бы False даже для строки, которая должна быть видна
+        hidden = not self.cb_cond.isVisibleTo(self)
+        if hidden:
+            h = max(self.cb_cond.minimumHeight(), self.cb_cond.sizeHint().height(),
+                    self._lbl_cond.sizeHint().height())
+            self._cond_gap.setFixedHeight(h)
+        self._cond_gap.setVisible(hidden)
+
     def _refresh_f(self):
         gost    = self.cb_std.currentText()
         p_key   = self.cb_load.currentText()
         i_ii    = self.cb_cond.currentText() if param_config.has_conditions(gost) else ""
         visible = param_config.fields(gost)
         vals    = param_config.values(gost, p_key, i_ii) or {}
-        _hide = "color: transparent; background: transparent; border-color: transparent;"
         for key, le in self._f_edits.items():
             show = key in visible
-            le.setStyleSheet("" if show else _hide)
-            le.setEnabled(show)
-            self._f_labels[key].setStyleSheet("" if show else "color: transparent;")
+            row = self._form_f.getWidgetPosition(le)[0]
+            if row >= 0:
+                self._form_f.setRowVisible(row, show)   # строка убирается целиком
             if show:
                 v = vals.get(key) if vals else None
                 le.setText(str(v) if v is not None else "")

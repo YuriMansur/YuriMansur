@@ -17,7 +17,12 @@ INFLUX_ORG       = "Albreht"
 INFLUX_BUCKET    = "plc_data"
 LIVE_RENDER_MS   = 50        # интервал скролла X-оси (~20 fps)
 LIVE_WINDOW_SECS = 300       # глубина live-окна (сек)
-MAX_LIVE_POINTS  = 100_000   # буфер на 300 с при 4 мс/точку
+
+# Ёмкость live-буфера не зашита: воркер сообщает реальный шаг между точками
+# (bus.stream_rate), и буфер выделяется под окно LIVE_WINDOW_SECS с запасом.
+LIVE_POINTS_START  = 100_000     # до первого сообщения о темпе
+LIVE_POINTS_LIMIT  = 2_000_000   # потолок (страховка от аномального темпа), ~16 МБ на массив
+LIVE_POINTS_MARGIN = 1.2         # запас сверх окна — батчи приходят неравномерно
 N_ARCHIVE_WORKERS = 8
 
 

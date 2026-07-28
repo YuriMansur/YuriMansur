@@ -4,8 +4,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QScrollArea, QPushButton, QSlider,
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QPixmap
+
+from event_bus import bus   # статусы привода (cmd_status) для подсветки кнопок
 
 try:
     import cv2 as _cv2
@@ -474,6 +476,32 @@ class _CameraWidget(QWidget):
         super().closeEvent(event)
 
 
+_STATUS_ACTIVE_STYLE = ("border: 2px solid #2ecc71; border-radius: 4px;"
+                        " background: rgba(46,204,113,0.25);")
+
+
+class _DriveStatusBinder(QObject):
+    """Подсветка кнопок привода по cmd_status с ПЛК.
+
+    Воркер раскладывает массив cmd_status по enum s_names и шлёт статусы как
+    tag_state с именем '<prefix><s_name>' (блок 'status' в servers.json). Здесь
+    сопоставляем имя статуса → кнопка и подсвечиваем активную. Живёт как child
+    контейнера секции — при пересборке UI Qt сам отключает слот от шины."""
+
+    def __init__(self, mapping: dict, prefix: str = "st:", parent=None):
+        super().__init__(parent)
+        # ключ шины (имя с префиксом) → (кнопка, её базовый стиль)
+        self._map = {prefix + name: (btn, btn.styleSheet()) for name, btn in mapping.items()}
+        bus.tag_state.connect(self._on_status)
+
+    def _on_status(self, name: str, val):
+        entry = self._map.get(name)
+        if entry is None:
+            return
+        btn, base = entry
+        btn.setStyleSheet(base + _STATUS_ACTIVE_STYLE if val else base)
+
+
 def _make_section1() -> QWidget:
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
@@ -500,61 +528,89 @@ def _make_section1() -> QWidget:
     ctrl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #1abc9c;")
     lay.addWidget(ctrl_title)
 
-    btn_power = QPushButton("Вкл. привод")
-    btn_power.setCheckable(True)
+    btn_power_on  = QPushButton("Вкл. привод")
+    btn_power_off = QPushButton("Выкл. привод")
 
-    btn_manual = QPushButton("Ручной режим")
-    btn_manual.setCheckable(True)
+    # Режим управления — текстовая индикация (значение обновляется извне)
+    lbl_mode = QLabel("Ручной")
+    lbl_mode.setObjectName("modeLabel")
+    lbl_mode.setStyleSheet(
+        "QLabel#modeLabel { font-family: 'Segoe UI Semibold', 'Segoe UI', sans-serif;"
+        " font-size: 15px; font-weight: bold; color: #1abc9c; background: transparent; }")
+    lbl_mode.setAlignment(Qt.AlignmentFlag.AlignHCenter)   # значение по центру подписи
+    container._mode_label = lbl_mode   # ссылка для обновления режима
 
     btn_up = QPushButton("▲")
-    btn_up.setFixedSize(48, 48)
+    btn_up.setFixedSize(42, 42)
 
     btn_down = QPushButton("▼")
-    btn_down.setFixedSize(48, 48)
+    btn_down.setFixedSize(42, 42)
 
     # запись команд в PLC (commands[...] через cmd-очередь):
-    # Вкл.привод — тумблер на 2 сигнала (вкл → EN_DRIVER, выкл → DIS_DRIVER),
+    # Вкл./Выкл. привод — две кнопки (EN_DRIVER / DIS_DRIVER),
     # ▲/▼ — толчок (TRUE пока нажато, FALSE при отпускании)
     from tag_binder import tags
-    btn_power.toggled.connect(
-        lambda on: tags.write("cmdEnableDriver" if on else "cmdDisableDriver", 1))
-    btn_up.pressed.connect(lambda: tags.write("cmdForwardJog", 1))
-    btn_up.released.connect(lambda: tags.write("cmdForwardJog", 0))
-    btn_down.pressed.connect(lambda: tags.write("cmdBackwardJog", 1))
-    btn_down.released.connect(lambda: tags.write("cmdBackwardJog", 0))
+    btn_power_on .clicked.connect(lambda: tags.write("cmdEnableDriver", 1))
+    btn_power_off.clicked.connect(lambda: tags.write("cmdDisableDriver", 1))
+    btn_up.pressed.connect(lambda: tags.write("cmdBackwardJog", 1))
+    btn_up.released.connect(lambda: tags.write("cmdBackwardJog", 0))
+    btn_down.pressed.connect(lambda: tags.write("cmdForwardJog", 1))
+    btn_down.released.connect(lambda: tags.write("cmdForwardJog", 0))
 
-    # Скорость + тоглы + сброс/авария на одной строке
-    motion_row = QHBoxLayout()
-    motion_row.setSpacing(8)
+    # Подсветка кнопок по фактическому статусу привода с ПЛК (cmd_status → st:<имя>).
+    # Имена — члены s_names на ПЛК (см. лог воркера "[worker] статусы:").
+    container._drive_status = _DriveStatusBinder({
+        "BW_JOGGING":      btn_up,         # ▲ = толчок назад (backward)
+        "FW_JOGGING":      btn_down,       # ▼ = толчок вперёд (forward)
+    }, prefix="st:", parent=container)
 
-    arrows_col = QHBoxLayout()
-    arrows_col.setSpacing(4)
-    arrows_col.addWidget(btn_up)
-    arrows_col.addWidget(btn_down)
+    # Каждая группа — в своём виджете-обёртке; в строке выравниваем по центру
+    # по вертикали, чтобы колонки разной высоты не «уезжали».
 
-    speed_col = QVBoxLayout()
-    speed_col.setSpacing(2)
-    speed_lbl = QLabel("Скорость мм/сек: 0.01")
-    speed_col.addWidget(speed_lbl)
+    # режим управления: подпись + значение
+    mode_col = QVBoxLayout(); mode_col.setContentsMargins(0, 0, 0, 0); mode_col.setSpacing(3)
+    mode_cap = QLabel("Режим управления")
+    mode_cap.setStyleSheet("color: #7f8c8d; font-size: 11px; background: transparent;")
+    mode_cap.setAlignment(Qt.AlignmentFlag.AlignHCenter)   # подпись по центру, как значение
+    mode_col.addWidget(mode_cap)
+    mode_col.addWidget(lbl_mode)
+    mode_w = QWidget(); mode_w.setLayout(mode_col)
+
+    # вкл/выкл привод — одна над другой, равной ширины
+    btn_power_on.setMinimumWidth(120)
+    btn_power_off.setMinimumWidth(120)
+    power_col = QVBoxLayout(); power_col.setContentsMargins(0, 0, 0, 0); power_col.setSpacing(6)
+    power_col.addWidget(btn_power_on)
+    power_col.addWidget(btn_power_off)
+    power_w = QWidget(); power_w.setLayout(power_col)
+
+    # скорость: подпись + слайдер
+    speed_col = QVBoxLayout(); speed_col.setContentsMargins(0, 0, 0, 0); speed_col.setSpacing(4)
+    speed_lbl = QLabel("Скорость: 0.01 мм/с")
+    speed_lbl.setStyleSheet("background: transparent;")
     slider = QSlider(Qt.Orientation.Horizontal)
-    slider.setRange(0, 600)
-    slider.setValue(1)
-    slider.setFixedWidth(120)
-    slider.valueChanged.connect(lambda v: speed_lbl.setText(f"Скорость мм/сек: {v / 100:.2f}"))
+    slider.setRange(0, 600); slider.setValue(1); slider.setMinimumWidth(40)
+    slider.valueChanged.connect(lambda v: speed_lbl.setText(f"Скорость: {v / 100:.2f} мм/с"))
+    speed_col.addWidget(speed_lbl)
     speed_col.addWidget(slider)
+    speed_w = QWidget(); speed_w.setLayout(speed_col)
 
-    # кнопка «Сброс» перенесена на верхнюю панель как «Сброс аварий» (main_window)
-    right_col = QVBoxLayout()
-    right_col.setSpacing(4)
-    toggle_row = QHBoxLayout()
-    toggle_row.setSpacing(4)
-    toggle_row.addWidget(btn_power)
-    toggle_row.addWidget(btn_manual)
-    right_col.addLayout(toggle_row)
+    # стрелки-толчки ▲/▼ рядом
+    arrows_row = QHBoxLayout(); arrows_row.setContentsMargins(0, 0, 0, 0); arrows_row.setSpacing(6)
+    arrows_row.addWidget(btn_up)
+    arrows_row.addWidget(btn_down)
+    arrows_w = QWidget(); arrows_w.setLayout(arrows_row)
 
-    motion_row.addLayout(arrows_col)
-    motion_row.addLayout(speed_col)
-    motion_row.addLayout(right_col)
+    # порядок слева направо: режим · вкл/выкл · скорость · стрелки.
+    # speed_w тянется (stretch=1) и забирает свободную ширину — остальные фиксированы,
+    # поэтому стрелки всегда видны справа, а при узкой панели ужимается слайдер.
+    _vc = Qt.AlignmentFlag.AlignVCenter
+    motion_row = QHBoxLayout()
+    motion_row.setSpacing(12)
+    motion_row.addWidget(mode_w,   0, _vc)
+    motion_row.addWidget(power_w,  0, _vc)
+    motion_row.addWidget(speed_w,  1, _vc)
+    motion_row.addWidget(arrows_w, 0, _vc)
     lay.addLayout(motion_row)
 
     sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
@@ -565,7 +621,8 @@ def _make_section1() -> QWidget:
     pos_row = QHBoxLayout()
     pos_row.addWidget(lbl_pos)
     pos_row.addStretch()
-    pos_row.addWidget(QPushButton("Обнулить L"))
+    btn_zero_l = QPushButton("Обнулить L")
+    pos_row.addWidget(btn_zero_l)
     lay.addLayout(pos_row)
 
     # Нагрузка
@@ -573,11 +630,18 @@ def _make_section1() -> QWidget:
     load_row = QHBoxLayout()
     load_row.addWidget(lbl_load)
     load_row.addStretch()
-    load_row.addWidget(QPushButton("Обнулить Н"))
+    btn_zero_h = QPushButton("Обнулить Н")
+    load_row.addWidget(btn_zero_h)
     load_row.addStretch()
     lbl_dh = QLabel("Скорость нагружения H, сек: 0")
     load_row.addWidget(lbl_dh)
     lay.addLayout(load_row)
+
+    # Ручное управление стендом. На время идущего испытания блокируется: приводом
+    # распоряжается методика (секция 3), а обнуление датчиков посреди испытания
+    # исказило бы показания. Переключает set_manual_controls_enabled().
+    container._manual_controls = [btn_power_on, btn_power_off, slider,
+                                  btn_up, btn_down, btn_zero_l, btn_zero_h]
 
     sep_cam = QFrame(); sep_cam.setFrameShape(QFrame.Shape.HLine)
     lay.addWidget(sep_cam)
@@ -594,3 +658,13 @@ def _make_section1() -> QWidget:
     lay.addWidget(cam2, 1)
     scroll.setWidget(container)
     return scroll, btn_alarm_test
+
+
+def set_manual_controls_enabled(section1: QWidget, enabled: bool) -> None:
+    """Разблокировать/заблокировать ручное управление стендом (панель «Управление»).
+
+    section1 — то, что вернул _make_section1(): QScrollArea с контейнером внутри.
+    """
+    inner = section1.widget() if isinstance(section1, QScrollArea) else section1
+    for w in getattr(inner, "_manual_controls", []):
+        w.setEnabled(enabled)

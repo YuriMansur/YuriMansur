@@ -54,7 +54,12 @@ def load_config() -> list[dict]:
         if log:
             logging_cfg = {
                 "index":      resolve(log["index_tag"]),
-                "array_size": log.get("array_size", 50),
+                # размер кольца определяется по длине читаемого массива (RingProc);
+                # array_size — лишь стартовая подсказка до первого чтения
+                "array_size": log.get("array_size", 0),
+                # команды GUI, включающие/выключающие запись в БД (логические имена
+                # тегов — воркер не знает, что именно они значат)
+                "record": log.get("record") or {},
                 "ring": [
                     {
                         "node":               resolve(r["tag"]),
@@ -76,6 +81,7 @@ def load_config() -> list[dict]:
             "reconnect_interval": srv.get("reconnect_interval", 5),
             "index_enum":         srv.get("index_enum"),   # тег, из типа которого берём карту имя→индекс
             "enums":              srv.get("enums") or {},   # статические карты имя→индекс (не опубликованы на OPC)
+            "status":             srv.get("status"),        # массив статусов + enum имён для подсветки кнопок
             "tags":               tags,
             "subscribe":          [resolve(t) for t in srv.get("subscribe", [])],
             "polls": [
@@ -102,8 +108,16 @@ POLL_INTERVAL      = _POLL["interval"]            # секунд между оп
 POLL_NIDS          = _POLL["nodes"]               # порядок: cc, затем массивы
 SUBSCRIBE_NIDS     = _SRV["subscribe"]            # кнопки + уставка
 _LOGGING           = _SRV["logging"]              # описание кольцевых потоков
+# Команды, по которым начинается/заканчивается запись потоков в БД. Данные пишем
+# только во время испытания: между испытаниями стенд «шумит», и архив забивался бы
+# бесполезными точками. На живой график это не влияет — он идёт через live_q.
+_REC_START         = set((_LOGGING or {}).get("record", {}).get("start", []))
+_REC_STOP          = set((_LOGGING or {}).get("record", {}).get("stop", []))
 _INDEX_ENUM        = _SRV.get("index_enum")       # имя тега-энума для резолва [ИМЯ]→[индекс]
 _STATIC_ENUMS      = _SRV.get("enums") or {}      # статические карты имя→индекс (напр. команды)
+_STATUS            = _SRV.get("status") or {}     # {array, enum, prefix} — статусы команд для подсветки
+_STATUS_ENUM_TAG   = _STATUS.get("enum")          # тег-энум имён статусов (s_names)
+_STATUS_PREFIX     = _STATUS.get("prefix", "")    # префикс имени статуса в шине (напр. "st:")
 
 # arr_node → тип сообщения для отправки «сырого» массива в GUI (если задан)
 RAW_ARRAY_MAP = {r["node"]: r["raw_array_msg"]
@@ -113,6 +127,7 @@ RAW_ARRAY_MAP = {r["node"]: r["raw_array_msg"]
 # GUI приходят по имени, наружу теги тоже уходят по имени.
 _TAGS        = _SRV["tags"]                            # имя → NodeId
 _NAME_BY_NID = {nid: name for name, nid in _TAGS.items()}  # NodeId → имя
+_STATUS_ARRAY_NID = _TAGS.get(_STATUS.get("array"))   # NodeId массива статусов (или None)
 
 
 def _normalize_nid(nid_str: str) -> str:
@@ -189,31 +204,38 @@ def _cast_value(val, vtype):
     return int(val)
 
 
+async def _read_enum_for(client: Client, tag: str) -> dict:
+    """Карта {имя_члена: индекс} из типа одного тега-энума (напр. s_names → EN_DRIVER)."""
+    result: dict = {}
+    if not tag or tag not in _TAGS:
+        return result
+    try:
+        node = client.get_node(_TAGS[tag])
+        dtn  = client.get_node(await node.read_data_type())
+        for prop in await dtn.get_properties():
+            bn = (await prop.read_browse_name()).Name
+            if bn == "EnumValues":
+                result.update({ev.DisplayName.Text: ev.Value for ev in await prop.read_value()})
+                break
+            if bn == "EnumStrings":
+                result.update({lt.Text: i for i, lt in enumerate(await prop.read_value())})
+                break
+    except Exception as e:
+        print(f"[worker] резолв enum '{tag}' не удался: {e}")
+    return result
+
+
 async def _read_enum_map(client: Client) -> dict:
-    """Карта {имя_члена: индекс} из типа тега _INDEX_ENUM (напр. b_names → PN_VAL_RB).
+    """Карта {имя_члена: индекс} из типов тегов _INDEX_ENUM (напр. b_names → PN_VAL_RB).
 
     Порядок enum берём с ПЛК, поэтому перестановка членов не путает каналы.
     """
     # старт со статических карт из конфига (если заданы), затем поверх — динамика
-    # со всех тегов-энумов (index_enum может быть строкой или списком: b_names, c_data…)
+    # со всех тегов-энумов (index_enum может быть строкой или списком: b_names, c_names…)
     result = dict(_STATIC_ENUMS)
     enum_tags = _INDEX_ENUM if isinstance(_INDEX_ENUM, (list, tuple)) else ([_INDEX_ENUM] if _INDEX_ENUM else [])
     for tag in enum_tags:
-        if tag not in _TAGS:
-            continue
-        try:
-            node = client.get_node(_TAGS[tag])
-            dtn  = client.get_node(await node.read_data_type())
-            for prop in await dtn.get_properties():
-                bn = (await prop.read_browse_name()).Name
-                if bn == "EnumValues":
-                    result.update({ev.DisplayName.Text: ev.Value for ev in await prop.read_value()})
-                    break
-                if bn == "EnumStrings":
-                    result.update({lt.Text: i for i, lt in enumerate(await prop.read_value())})
-                    break
-        except Exception as e:
-            print(f"[worker] резолв enum '{tag}' не удался: {e}")
+        result.update(await _read_enum_for(client, tag))
     return result
 
 
@@ -224,6 +246,19 @@ async def _run_connected(client: Client, live_q, cmd_q, procs: list):
     # карта имя→индекс enum с ПЛК; символьные пути (data_buffer[TENZA_ONE]) при
     # создании узла разворачиваются в числовые, ключи сопоставления остаются как в конфиге
     enum_map = await _read_enum_map(client)
+
+    # карта имён статусов s_names → индекс в массиве cmd_status (отдельно от enum_map,
+    # т.к. индексы разных энумов совпадают — нужен именно набор s_names)
+    status_map  = await _read_enum_for(client, _STATUS_ENUM_TAG)
+    status_last: dict = {}   # имя статуса → последнее булево (шлём в GUI только по фронту)
+
+    # Размер кольца не задаём и не читаем отдельным тегом: RingProc берёт его из
+    # длины самого массива при первом же чтении (см. RingProc.on_data). Фактический
+    # темп он же измеряет и отдаёт в GUI через on_rate.
+
+    if _STATUS:
+        print(f"[worker] статусы: array={_STATUS.get('array')} nid={_STATUS_ARRAY_NID} "
+              f"s_names={status_map}")
 
     # Кэш объектов узлов: ключ — как в конфиге (для сопоставления в RingProc),
     # сам узел — с числовым индексом (для чтения на сервере)
@@ -270,6 +305,13 @@ async def _run_connected(client: Client, live_q, cmd_q, procs: list):
                 cmd = cmd_q.get_nowait()
                 name = cmd['cmd']                 # логическое имя тега
                 val  = cmd['val']
+                # Начало/конец испытания → запись потоков в БД. Переключаем до
+                # записи тега: даже если она не пройдёт, данные испытания важнее.
+                if name in _REC_START or name in _REC_STOP:
+                    rec = name in _REC_START
+                    for p in procs:
+                        p.set_recording(rec)
+                    print(f"[worker] запись в БД {'включена' if rec else 'выключена'} ({name})")
                 nid  = _TAGS.get(name)
                 if nid is None:
                     print(f"[worker] неизвестная команда '{name}'")
@@ -301,6 +343,18 @@ async def _run_connected(client: Client, live_q, cmd_q, procs: list):
             if raw_name:
                 live_q.put_nowait({'type': 'array', 'name': raw_name,
                                    'data': list(val) if val else []})
+            # cmd_status → именованные статусы (st:<имя>) для подсветки кнопок в GUI.
+            # Раскладываем массив по s_names; шлём tag_state только по фронту.
+            if nid == _STATUS_ARRAY_NID and status_map:
+                arr = list(val) if val else []
+                for sname, sidx in status_map.items():
+                    if sidx < len(arr):
+                        b = bool(arr[sidx])
+                        if status_last.get(sname) != b:
+                            status_last[sname] = b
+                            print(f"[worker] статус {_STATUS_PREFIX}{sname} = {b}")
+                            live_q.put_nowait({'type': 'tag',
+                                               'name': _STATUS_PREFIX + sname, 'val': b})
 
         # keepalive: проверка живости соединения — детект обрыва даже без data-тегов
         await status_node.read_value()   # исключение → выход → reconnect
@@ -335,6 +389,10 @@ def build_procs(write_api, bucket: str, org: str, live_q) -> list:
         return lambda times, vals: live_q.put_nowait(
             {'type': 'points', 'name': stream, 'times': times, 'vals': vals})
 
+    def emit_rate(stream):
+        return lambda step_ms: live_q.put_nowait(
+            {'type': 'rate', 'name': stream, 'step_ms': step_ms})
+
     return [
         RingProc(
             write_api, bucket, org,
@@ -343,7 +401,10 @@ def build_procs(write_api, bucket: str, org: str, live_q) -> list:
             scalar_nid=r["scalar_node"],
             scalar_measurement=r["scalar_measurement"],
             on_scalar=emit(r["scalar_msg"]) if r["scalar_msg"] else None,
-            array_size=_LOGGING["array_size"],
+            array_size=_LOGGING["array_size"],      # 0 → ждём max_array_length с ПЛК
+            poll_ms=_POLL["interval"] * 1000,       # период опроса массива из конфига
+            stream=r["points_msg"],
+            on_rate=emit_rate(r["points_msg"]),     # измеренный темп → тренды
         )
         for r in _LOGGING["ring"]
     ]

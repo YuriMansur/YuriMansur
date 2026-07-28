@@ -1,0 +1,11 @@
+{
+  "cam1": {
+    "device_id": 0,
+    "device_name": "HP FHD Camera"
+  },
+  "cam2": {
+    "device_id": null,
+    "device_name": ""
+  },
+  "save_dir": "C:\\Users\\Dev"
+}

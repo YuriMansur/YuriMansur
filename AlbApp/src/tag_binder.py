@@ -6,9 +6,12 @@
 
   tags.on("cmdPowerOn", cb)   # cb(value) вызовется при изменении тега
   tags.write("cmdPowerOn", 1) # запись на ПЛК (через bus.command → worker)
+  link.state                  # текущее состояние связи с ПЛК (см. LinkState)
 """
 import json
 from pathlib import Path
+
+from PyQt6.QtCore import QObject, pyqtSignal
 
 from event_bus import bus
 
@@ -35,6 +38,8 @@ class TagBinder:
     def __init__(self):
         self._known = _known_names()
         self._cbs: dict[str, list] = {}
+        self._last: dict = {}
+        bus.tag_state.connect(self._remember)
         bus.tag_state.connect(self._route)
         bus.stream_array.connect(self._route)
         bus.stream_points.connect(self._route_points)
@@ -49,6 +54,18 @@ class TagBinder:
         """Запись значения тега на ПЛК."""
         bus.command.emit(tag, int(value))
 
+    def last(self, name: str, default=None):
+        """Последнее известное значение тега.
+
+        Сигналы шины событийные: значение приходит по изменению, и виджет,
+        созданный позже, его уже не увидит. Кэш позволяет прочитать состояние
+        сразу при построении — как link.state для состояния связи.
+        """
+        return self._last.get(name, default)
+
+    def _remember(self, name: str, val) -> None:
+        self._last[name] = val
+
     # ── маршрутизация сигналов шины в адресные колбэки ──────────────────────
     def _route(self, name: str, val) -> None:
         for cb in self._cbs.get(name, []):
@@ -59,5 +76,39 @@ class TagBinder:
             cb(v)
 
 
-# единый экземпляр на приложение (как bus)
+class LinkState(QObject):
+    """Текущее состояние связи с ПЛК — с запоминанием последнего значения.
+
+    Сигналы шины событийные: виджет, построенный уже ПОСЛЕ подключения, события
+    не увидит и навсегда останется с «нет связи». Здесь состояние кэшируется
+    один раз на приложение, поэтому виджет читает его сразу при построении
+    (link.state), а на изменения подписывается через link.changed.
+
+    Разрыв воркер шлёт парой disconnected → reconnecting, поэтому после обрыва
+    видимое состояние — RECONNECTING (авто-переподключение уже идёт).
+    """
+    UNKNOWN      = "unknown"    # событий ещё не было — связь неизвестна
+    UP           = "up"
+    DOWN         = "down"
+    RECONNECTING = "reconnecting"
+
+    changed = pyqtSignal(str, str)   # (состояние, имя сервера)
+
+    def __init__(self):
+        super().__init__()
+        self.state  = self.UNKNOWN
+        self.server = ""
+        bus.server_connected   .connect(lambda srv:     self._set(self.UP, srv))
+        bus.server_disconnected.connect(lambda srv:     self._set(self.DOWN, srv))
+        bus.reconnecting       .connect(lambda srv, _i: self._set(self.RECONNECTING, srv))
+
+    def _set(self, state: str, server: str) -> None:
+        if (state, server) == (self.state, self.server):
+            return                      # состояние не изменилось — не дёргаем виджеты
+        self.state, self.server = state, server
+        self.changed.emit(state, server)
+
+
+# единые экземпляры на приложение (как bus)
 tags = TagBinder()
+link = LinkState()

@@ -128,8 +128,15 @@ class MainWindow(QMainWindow):
         # Добавление растяжки для выравнивания кнопок влево
         nav_layout.addStretch()
 
-        # Кнопка сброса аварий (справа, где раньше были «Протоколы»)
-        self._btn_reset_nav = QPushButton("⟲ Сброс аварий")
+        # Кнопка сброса аварий (справа, где раньше были «Протоколы»).
+        # Иконка — треугольник аварии в круговой стрелке, рисуется кодом
+        # (gui/icons.py), белым по красному фону кнопки.
+        from PyQt6.QtGui import QIcon
+        from PyQt6.QtCore import QSize
+        from gui.icons import make_icon
+        self._btn_reset_nav = QPushButton(" Сброс аварий")
+        self._btn_reset_nav.setIcon(QIcon(make_icon("reset_fault", "#ffffff", 20)))
+        self._btn_reset_nav.setIconSize(QSize(20, 20))
         self._btn_reset_nav.setFixedHeight(36)
         self._btn_reset_nav.setToolTip("Сброс аварий")
         self._btn_reset_nav.setStyleSheet(
@@ -191,10 +198,10 @@ class MainWindow(QMainWindow):
 
         page1.alarm_test.connect(self._start_alarm_blink)
         page1.alarm_reset.connect(self._stop_alarm_blink)
-        def _reset_faults(_=False, _p=page1):
+        def _reset_faults(_=False):
             from tag_binder import tags
             tags.write("cmdResetFault", 1)   # одиночная запись TRUE на сервер (RESET_FAULT)
-            _p.alarm_reset.emit()            # локально погасить мигание аварии
+            # мигание НЕ гасим локально: авария снимется по фронту general_fault 1→0 от ПЛК
         self._btn_reset_nav.clicked.connect(_reset_faults)   # «Сброс аварий» на верхней панели
 
         # Авария по тегу general_fault: читаем тег с ПЛК и по фронту 0→1
