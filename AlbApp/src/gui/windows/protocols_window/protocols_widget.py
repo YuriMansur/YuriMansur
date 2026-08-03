@@ -11,9 +11,11 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QFileIconProvider, QStyle,
+    QFileIconProvider, QStyle, QApplication,
 )
 from PyQt6.QtCore import Qt, QFileInfo, QFileSystemWatcher
+
+from gui.windows.messages_window.messages_viewer import table_style
 
 # protocols_window → windows → gui → src → AlbApp; documents лежит в AlbApp/documents
 _DOCS_DIR = Path(__file__).resolve().parents[4] / "documents"
@@ -67,12 +69,7 @@ class ProtocolsWidget(QWidget):
         self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tbl.setShowGrid(True)
-        self._tbl.setStyleSheet(
-            "QTableWidget { gridline-color: #9aa5b1;"
-            " border: 2px solid #ffffff; border-radius: 4px; }"
-            " QHeaderView::section { background: #e84393; color: #ffffff;"
-            " font-weight: bold; padding: 6px 10px;"
-            " border: none; border-right: 1px solid #d63384; }")
+        self._restyle_table()
         self._tbl.setToolTip("Двойной клик: папка — открыть внутри, файл — открыть в Word")
         self._tbl.itemDoubleClicked.connect(self._on_double)
         hh = self._tbl.horizontalHeader()
@@ -169,6 +166,12 @@ class ProtocolsWidget(QWidget):
         except OSError as e:
             self._status.setText(f"Не удалось открыть: {e}")
 
+    def _restyle_table(self):
+        """Перекрасить таблицу под текущую палитру приложения."""
+        app = QApplication.instance()
+        pal = app.palette() if app is not None else self.palette()
+        self._tbl.setStyleSheet(table_style(pal, "#e84393", "#d63384"))
+
     def set_theme(self, dark: bool):
-        # стиль наследуется из палитры приложения
-        pass
+        # у таблицы свой stylesheet, палитру она сама не подхватывает
+        self._restyle_table()

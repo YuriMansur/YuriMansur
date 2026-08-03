@@ -8,11 +8,11 @@ import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFrame,
     QListWidget, QListWidgetItem, QSpinBox, QSlider, QComboBox, QCheckBox,
-    QProgressBar, QFileDialog, QGroupBox, QSplitter,
+    QProgressBar, QFileDialog, QGroupBox,
 )
 from PyQt6.QtCore import Qt
 
-from ._overlay_worker import CHANNELS
+from ._overlay_worker import CHANNELS, _find_sidecar
 from ._video_player import VideoPlayer
 
 CHANNEL_NAMES = [c[2] for c in CHANNELS]
@@ -46,22 +46,26 @@ class VideoOverlayWidget(QWidget):
         root.addWidget(hint)
 
         # ── главная область: слева управление, справа плеер ───────────────────
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.addWidget(self._build_controls())
+        # Не сплиттер: ширину колонки управления двигать незачем, а всё лишнее
+        # место лучше отдать кадру. Ширина — минимально возможная для её полей,
+        # берётся из самой колонки, а не задаётся числом.
+        main = QHBoxLayout()
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(8)
+
+        controls = self._build_controls()
+        controls.setFixedWidth(controls.minimumSizeHint().width())
+        main.addWidget(controls)
 
         self._player = VideoPlayer()
-        split.addWidget(self._player)
-        split.setStretchFactor(0, 0)     # колонка управления — фикс
-        split.setStretchFactor(1, 1)     # плеер тянется
-        split.setSizes([430, 1200])
-        root.addWidget(split, 1)
+        main.addWidget(self._player, 1)
+        root.addLayout(main, 1)
 
         self._refresh_run_enabled()
 
     def _build_controls(self) -> QWidget:
         """Левая колонка: файлы, параметры, запуск, прогресс."""
         col = QWidget()
-        col.setMaximumWidth(480)
         v = QVBoxLayout(col)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
@@ -190,8 +194,8 @@ class VideoOverlayWidget(QWidget):
     def _rebuild_list(self):
         self._list.clear()
         for f in self._files:
-            sidecar = os.path.splitext(f)[0] + ".csv"
-            ok = os.path.exists(sidecar)
+            # тем же правилом, что и обработчик: у пары камер сайдкар общий
+            ok = os.path.exists(_find_sidecar(f))
             mark = "✓ сайдкар" if ok else "✗ нет сайдкара"
             item = QListWidgetItem(f"{os.path.basename(f)}    [{mark}]")
             if not ok:

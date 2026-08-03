@@ -97,21 +97,22 @@ class MainWindow(QMainWindow):
         self.nav_buttons = []
 
         # Кортеж стилизации кнопок
+        # значки рисуются кодом (gui/icons.py) и перекрашиваются вместе с надписью
         page_data = [
-            ("🧪 Испытания", "#1abc9c"),
-            ("🎬 Видеоналожение", "#e74c3c"),
-            ("📈 Тренды", "#3498db"),
-            ("💬 Сообщения", "#e67e22"),
-            ("📤 Экспорт", "#27ae60"),
-            ("📄 Протоколы/Журналы", "#e84393"),
-            ("⚙️ Настройки", "#9b59b6"),
+            (" Испытания",          "#1abc9c", "flask"),
+            (" Видеоналожение",     "#e74c3c", "video"),
+            (" Тренды",             "#3498db", "chart"),
+            (" Сообщения",          "#e67e22", "chat"),
+            (" Экспорт",            "#27ae60", "export"),
+            (" Протоколы/Журналы",  "#e84393", "doc"),
+            (" Настройки",          "#9b59b6", "gear"),
         ]
 
         # Создание кнопок навигации
-        for i, (title, color) in enumerate(page_data):
+        for i, (title, color, icon_kind) in enumerate(page_data):
 
             # Создание кнопки навигации
-            btn = NavigationButton(title, color)
+            btn = NavigationButton(title, color, icon_kind)
 
             # Добавление возможности переключения
             btn.setCheckable(True) 
@@ -196,7 +197,7 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(page_protocols)
         self.stacked_widget.addWidget(page3)
 
-        page1.alarm_test.connect(self._start_alarm_blink)
+        page1.alarm_raised.connect(self._start_alarm_blink)
         page1.alarm_reset.connect(self._stop_alarm_blink)
         def _reset_faults(_=False):
             from tag_binder import tags
@@ -205,9 +206,9 @@ class MainWindow(QMainWindow):
         self._btn_reset_nav.clicked.connect(_reset_faults)   # «Сброс аварий» на верхней панели
 
         # Авария по тегу general_fault: читаем тег с ПЛК и по фронту 0→1
-        # поджигаем ту же аварию, что и «Тест аварии» (мигание рамки + прерывание
-        # в секции 3). По фронту 1→0 — сброс. Сам тег прокидывается в servers.json
-        # отдельно; до этого биндер просто предупредит, что имени ещё нет.
+        # поднимаем аварию: мигание рамки + прерывание в секции 3. По фронту
+        # 1→0 — сброс. Сам тег прокидывается в servers.json отдельно; до этого
+        # биндер просто предупредит, что имени ещё нет.
         import threading
         from tag_binder import tags
         from logger import applog
@@ -254,7 +255,7 @@ class MainWindow(QMainWindow):
         def _on_accident(val, _p=page1):
             active = bool(val)
             if active and not self._accident_active:
-                _p.alarm_test.emit()
+                _p.alarm_raised.emit()
             elif not active and self._accident_active:
                 _p.alarm_reset.emit()
             self._accident_active = active

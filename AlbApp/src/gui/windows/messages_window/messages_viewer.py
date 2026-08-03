@@ -6,12 +6,12 @@ logs.db. Фильтр по уровню/категории, автообновл
 """
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QDateEdit, QTimeEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QApplication,
 )
 from collections import deque
 
 from PyQt6.QtCore import Qt, QTimer, QDate, QTime
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPalette
 
 from logger import applog
 from event_bus import bus
@@ -24,6 +24,27 @@ _LEVEL_COLOR = {
     applog.LEVEL_ALARM: "#c0392b",
 }
 _TITLE_STYLE = "font-size: 15px; font-weight: bold; color: #e67e22;"
+
+
+def table_style(pal, header_bg: str, header_sep: str) -> str:
+    """Оформление таблицы по палитре приложения.
+
+    Фон задаём явно: как только у QTableWidget появляется свой stylesheet, Qt
+    перестаёт брать Base из палитры и рисует таблицу белой — на тёмной теме она
+    оставалась светлым пятном. Шапка своего цвета, он у страницы опознавательный.
+    """
+    R = QPalette.ColorRole
+    return (
+        f"QTableWidget {{ background: {pal.color(R.Base).name()};"
+        f" color: {pal.color(R.Text).name()};"
+        f" gridline-color: {pal.color(R.Mid).name()};"
+        f" border: 1px solid {pal.color(R.Mid).name()}; border-radius: 4px; }}"
+        f" QTableWidget::item:selected {{ background: {pal.color(R.Highlight).name()};"
+        f" color: {pal.color(R.HighlightedText).name()}; }}"
+        f" QHeaderView::section {{ background: {header_bg}; color: #ffffff;"
+        f" font-weight: bold; padding: 6px 10px;"
+        f" border: none; border-right: 1px solid {header_sep}; }}"
+    )
 
 
 class MessagesWidget(QWidget):
@@ -43,14 +64,8 @@ class MessagesWidget(QWidget):
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        # мягкая светло-серая сетка для разделения колонок + белый контур виджета
         self._tbl.setShowGrid(True)
-        self._tbl.setStyleSheet(
-            "QTableWidget { gridline-color: #9aa5b1;"
-            " border: 2px solid #ffffff; border-radius: 4px; }"
-            " QHeaderView::section { background: #e67e22; color: #ffffff;"
-            " font-weight: bold; padding: 6px 10px;"
-            " border: none; border-right: 1px solid #d9741f; }")
+        self._restyle_table()
         hh = self._tbl.horizontalHeader()
         for col in (0, 1, 2):
             hh.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
@@ -232,6 +247,13 @@ class MessagesWidget(QWidget):
             self._insert_row(self._tbl.rowCount(), r)
         sb.setValue(min(pos, sb.maximum()))
 
+    def _restyle_table(self):
+        """Перекрасить таблицу под текущую палитру приложения."""
+        app = QApplication.instance()
+        pal = app.palette() if app is not None else self.palette()
+        self._tbl.setStyleSheet(table_style(pal, "#e67e22", "#d9741f"))
+
     def set_theme(self, dark: bool):
-        # стиль наследуется из палитры приложения; явных действий не требуется
+        # у таблицы свой stylesheet, палитру она сама не подхватывает
+        self._restyle_table()
         self.reload()

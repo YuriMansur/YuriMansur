@@ -1,15 +1,17 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
 from PyQt6.QtCore import pyqtSignal
 
-from gui.windows.experiment_window.section1 import _make_section1, set_manual_controls_enabled
+from gui.windows.experiment_window.section1 import (
+    _make_section1, set_manual_controls_enabled, set_test_running,
+)
 from gui.windows.experiment_window.section2 import Section2Widget
 from gui.windows.experiment_window.section3 import Section3Widget
 from gui.windows.experiment_window.section4 import make_section4
 
 
 class ExperimentWidget(QWidget):
-    alarm_test  = pyqtSignal()
-    alarm_reset = pyqtSignal()
+    alarm_raised = pyqtSignal()   # авария поднялась (фронт general_fault 0→1)
+    alarm_reset  = pyqtSignal()   # авария снята ПЛК (фронт 1→0)
 
     def __init__(self):
         super().__init__()
@@ -34,6 +36,7 @@ class ExperimentWidget(QWidget):
             # ручное управление стендом на время испытания недоступно
             if getattr(self, "_sec1", None) is not None:
                 set_manual_controls_enabled(self._sec1, not running)
+                set_test_running(self._sec1, running)
 
         sec3.started.connect(_on_started)
 
@@ -48,7 +51,7 @@ class ExperimentWidget(QWidget):
             col_layout.setSpacing(4)
 
             if i == 1:
-                sec1, self._btn_alarm_test = _make_section1()
+                sec1 = _make_section1()
                 self._sec1 = sec1
                 col_layout.addWidget(sec1, 1)
             elif i == 2:
@@ -62,7 +65,7 @@ class ExperimentWidget(QWidget):
             columns_layout.addWidget(frame, stretch)
 
         main_layout.addLayout(columns_layout, 1)
-        self.alarm_test.connect(sec3.on_alarm)
+        self.alarm_raised.connect(sec3.on_alarm)
 
 
     def set_theme(self, dark: bool):

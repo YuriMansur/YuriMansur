@@ -2,12 +2,15 @@ import datetime, os, time
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-    QScrollArea, QPushButton, QSlider,
+    QScrollArea, QPushButton, QSlider, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject, QEvent, QSize
+from PyQt6.QtGui import QPixmap, QIcon, QColor, QFont
+from PyQt6.QtWidgets import QToolTip
 
 from event_bus import bus   # статусы привода (cmd_status) для подсветки кнопок
+from gui.icons import make_icon
+from tag_binder import tags, link   # значения тегов ПЛК + состояние связи
 
 try:
     import cv2 as _cv2
@@ -20,6 +23,54 @@ import threading as _threading
 
 
 
+
+
+class _RecSession:
+    """Общая сессия записи камер: одна метка времени и один сайдкар на обе.
+
+    Ролики пишутся в разные файлы — `rec_<стамп>_cam1.avi` и `..._cam2.avi`,
+    иначе вторая камера, стартовавшая в ту же секунду, затирала бы первую.
+    Таблица «кадр → время» при этом одна: наложение графика берёт время по
+    номеру кадра, а камеры пишутся через один writer на 25 fps и стартуют
+    вместе, поэтому вторая таблица повторяла бы первую.
+
+    Ведёт её камера, начавшая запись первой; вторая только присоединяется.
+    Файл закрывается, когда запись остановили обе.
+    """
+
+    _stamp: str = ""
+    _file = None
+    _users: int = 0
+    _frame_no: int = 0
+
+    @classmethod
+    def join(cls) -> tuple[str, bool]:
+        """Войти в сессию. Возвращает (метка времени, вести ли сайдкар)."""
+        owner = cls._users == 0
+        if owner:
+            cls._stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            cls._frame_no = 0
+            try:
+                path = os.path.join(os.path.expanduser("~"), f"rec_{cls._stamp}.csv")
+                cls._file = open(path, "w", encoding="utf-8", buffering=1)
+                cls._file.write("frame,timestamp\n")
+            except OSError:
+                cls._file = None
+        cls._users += 1
+        return cls._stamp, owner
+
+    @classmethod
+    def write_frame_time(cls, ts: float) -> None:
+        if cls._file is not None:
+            cls._file.write(f"{cls._frame_no},{ts:.6f}\n")
+            cls._frame_no += 1
+
+    @classmethod
+    def leave(cls) -> None:
+        cls._users = max(0, cls._users - 1)
+        if cls._users == 0 and cls._file is not None:
+            cls._file.close()
+            cls._file = None
 
 
 class _FrameWorker(QThread):
@@ -136,13 +187,18 @@ class _CameraWidget(QWidget):
     cameras_found      = pyqtSignal(list)         # список (idx, name)
     capabilities_found = pyqtSignal(list, list)   # supported_resolutions, supported_fps
 
+    # Все созданные камеры панели: запись идёт на всех сразу, а не на той, чью
+    # кнопку нажали, — ролик испытания должен быть с обеих точек съёмки.
+    _instances: list = []
+
     def __init__(self, cam_idx: int = 0, parent=None):
         super().__init__(parent)
         self._cam_idx   = cam_idx
         self._cap       = None
         self._writer    = None
-        self._ts_file   = None   # сайдкар: реальное время каждого записанного кадра
+        self._ts_owner  = False  # эта камера ведёт общий сайдкар (см. _RecSession)
         self._recording = False
+        _CameraWidget._instances.append(self)
         self._found: list = []   # последний результат скана: [(device_idx, name), ...]
         self._worker: _FrameWorker | None = None
         self.setMouseTracking(True)
@@ -155,8 +211,9 @@ class _CameraWidget(QWidget):
         self._preview.setMouseTracking(True)
 
 
-        # индикатор записи (левый верхний угол)
-        self._rec_indicator = QLabel("⏺ REC", self)
+        # индикатор записи (левый верхний угол): красный мигающий «REC» —
+        # символ-точка перед ним зависел от шрифта, а смысла не добавлял
+        self._rec_indicator = QLabel("REC", self)
         self._rec_indicator.setStyleSheet("""
             QLabel {
                 color: #ff3b3b; font-size: 12px; font-weight: bold;
@@ -175,14 +232,26 @@ class _CameraWidget(QWidget):
         self._overlay = QWidget(self)
         self._overlay.hide()
 
-        self._btn_open = QPushButton("▶")
-        self._btn_rec  = QPushButton("⏺")
-        self._btn_stop = QPushButton("⏹")
+        # значки рисуются кодом (gui/icons.py) — символы юникода в разных темах
+        # и шрифтах выглядели по-разному
+        from PyQt6.QtGui import QIcon
+        from PyQt6.QtCore import QSize
+        from gui.icons import make_icon
+        self._btn_open = QPushButton()
+        self._btn_rec  = QPushButton()
+        self._btn_stop = QPushButton()
+        for btn, kind, tip in ((self._btn_open, "eye",     "Открыть камеру"),
+                               (self._btn_rec,  "record",  "Начать запись"),
+                               (self._btn_stop, "stop_sq", "Остановить запись")):
+            btn.setIcon(QIcon(make_icon(kind, "#ffffff", 14)))
+            btn.setIconSize(QSize(14, 14))
+            btn.setToolTip(tip)
         self._lbl_status = QLabel("Камера закрыта")
         self._btn_rec.setEnabled(False)
         self._btn_stop.setEnabled(False)
         for btn in (self._btn_open, self._btn_rec, self._btn_stop):
             btn.setFixedSize(28, 28)
+        self._set_open_icon(opened=False)
 
         ov_lay = QHBoxLayout(self._overlay)
         ov_lay.setContentsMargins(6, 4, 6, 4)
@@ -207,14 +276,27 @@ class _CameraWidget(QWidget):
         self._hover_timer.start()
 
         self._btn_open.clicked.connect(self._open_camera)
-        self._btn_rec.clicked.connect(self._start_record)
-        self._btn_stop.clicked.connect(self._stop)
+        # через lambda: clicked передаёт checked первым аргументом, а там _peer
+        self._btn_rec.clicked.connect(lambda: self._start_record())
+        self._btn_stop.clicked.connect(lambda: self._stop())
 
         self._scan_timer = QTimer(self)
         self._scan_timer.setInterval(5000)
         self._scan_timer.timeout.connect(self._do_scan)
         self._scan_timer.start()
         self._do_scan()
+
+    def _set_open_icon(self, opened: bool):
+        """Кнопка открытия камеры: «открыть» ⇄ «закрыть».
+
+        Меняем именно значок и подсказку — раньше поверх иконки дописывался
+        текстовый символ, и на кнопке оказывалось два обозначения сразу.
+        """
+        from PyQt6.QtGui import QIcon
+        from gui.icons import make_icon
+        kind, tip = ("eye_off", "Закрыть камеру") if opened else ("eye", "Открыть камеру")
+        self._btn_open.setIcon(QIcon(make_icon(kind, "#ffffff", 14)))
+        self._btn_open.setToolTip(tip)
 
     def _get_cam_name(self) -> str:
         import json
@@ -344,7 +426,9 @@ class _CameraWidget(QWidget):
         self._cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, 9999)
         self._cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
         if self._cap.isOpened():
-            self._btn_open.setText("⏹")
+            # кнопка становится «закрыть» — меняем значок, а не подписываем текстом
+            # поверх него (иначе рядом с иконкой торчал старый символ)
+            self._set_open_icon(opened=True)
             self._lbl_status.setText("Камера открыта")
             self._start_worker()
         else:
@@ -375,36 +459,64 @@ class _CameraWidget(QWidget):
             self._btn_stop.setEnabled(True)
             self._lbl_status.setText("Камера открыта")
 
-    def _start_record(self):
+    def _peers(self) -> list:
+        """Остальные живые камеры панели — запись идёт и снимается на всех.
+
+        Пересобранные виджеты остаются в списке мёртвыми обёртками (панель
+        перестраивается, например, при смене темы), поэтому отсеиваем их здесь.
+        """
+        alive = []
+        for cam in list(_CameraWidget._instances):
+            if cam is self:
+                continue
+            try:
+                cam.isVisible()          # у удалённого виджета бросит RuntimeError
+            except RuntimeError:
+                _CameraWidget._instances.remove(cam)
+                continue
+            alive.append(cam)
+        return alive
+
+    def _start_record(self, _peer: bool = False):
+        if self._recording:
+            return
         if not self._cap or not self._cap.isOpened():
+            if not _peer:
+                # нажали запись, а вторая камера закрыта — сказать об этом
+                self._lbl_status.setText("Камера не открыта — запись не начата")
             return
         w = int(self._cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self._cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(os.path.expanduser("~"), f"rec_{ts}.avi")
+        # Номер камеры в имени обязателен: без него две камеры, начавшие запись
+        # в одну секунду, писали бы в один файл. Сайдкар — общий (см. _RecSession).
+        stamp, self._ts_owner = _RecSession.join()
+        path = os.path.join(os.path.expanduser("~"),
+                            f"rec_{stamp}_cam{self._cam_idx + 1}.avi")
         fourcc = _cv2.VideoWriter_fourcc(*"XVID")
         self._writer = _cv2.VideoWriter(path, fourcc, 25.0, (w, h))
-
-        # Сайдкар: на каждый записанный кадр — его реальное UTC-время (unix, сек).
-        # Нужен вкладке наложения графика для точной синхронизации видео с InfluxDB:
-        # writer жёстко на 25 fps, а реальный темп захвата плавает.
-        try:
-            self._ts_file = open(os.path.splitext(path)[0] + ".csv", "w",
-                                 encoding="utf-8", buffering=1)
-            self._ts_file.write("frame,timestamp\n")
-            self._frame_no = 0
-        except OSError:
-            self._ts_file = None
 
         self._recording = True
         self.recording_changed.emit(True)
         self._btn_rec.setEnabled(False)
-        self._lbl_status.setText(f"● Запись → {os.path.basename(path)}")
+        self._lbl_status.setText(f"Запись → {os.path.basename(path)}")
         self._rec_indicator.show()
         self._rec_indicator.raise_()
         self._rec_blink.start()
 
-    def _stop(self):
+        if not _peer:                     # подхватить остальные камеры
+            idle = []
+            for cam in self._peers():
+                cam._start_record(_peer=True)
+                if not cam._recording:
+                    idle.append(str(cam._cam_idx + 1))
+            if idle:
+                # ролик выйдет только с одной точки — оператор должен это видеть
+                self._lbl_status.setText(
+                    f"Запись → {os.path.basename(path)}"
+                    f"  (камера {', '.join(idle)} закрыта — без записи)")
+
+    def _stop(self, _peer: bool = False):
+        was_recording = self._recording
         self._recording = False
         self.recording_changed.emit(False)
         self._rec_blink.stop()
@@ -412,11 +524,16 @@ class _CameraWidget(QWidget):
         if self._writer:
             self._writer.release()
             self._writer = None
-        if self._ts_file is not None:
-            self._ts_file.close()
-            self._ts_file = None
+        if was_recording:
+            # сайдкар закроется, когда запись остановят обе камеры
+            _RecSession.leave()
+            self._ts_owner = False
         self._btn_rec.setEnabled(True)
         self._lbl_status.setText("Камера открыта")
+
+        if was_recording and not _peer:   # остановить остальные камеры
+            for cam in self._peers():
+                cam._stop(_peer=True)
 
     def _close_camera(self):
         self._stop()
@@ -430,7 +547,7 @@ class _CameraWidget(QWidget):
             self._cap = None
         self._preview.setPixmap(QPixmap())
         self._preview.setText("Нет сигнала")
-        self._btn_open.setText("▶")
+        self._set_open_icon(opened=False)
         self._btn_rec.setEnabled(False)
         self._btn_stop.setEnabled(False)
         self._lbl_status.setText("Камера закрыта")
@@ -446,10 +563,9 @@ class _CameraWidget(QWidget):
     def _on_frame(self, frame):
         if self._recording and self._writer:
             self._writer.write(frame)
-            if self._ts_file is not None:
+            if self._ts_owner:
                 # время кадра пишем в том же порядке, в каком кадры идут в файл
-                self._ts_file.write(f"{self._frame_no},{time.time():.6f}\n")
-                self._frame_no += 1
+                _RecSession.write_frame_time(time.time())
         try:
             from PyQt6.QtGui import QImage
             from PyQt6.QtCore import QRect
@@ -511,45 +627,39 @@ def _make_section1() -> QWidget:
     lay.setContentsMargins(6, 6, 6, 6)
     lay.setSpacing(8)
 
-    btn_alarm_test = QPushButton("Тест аварии")
+    # значки кнопок рисуются кодом — см. gui/icons.py
+    from PyQt6.QtGui import QIcon
+    from PyQt6.QtCore import QSize
+    from gui.icons import make_icon
 
-    def _emit_alarm():
-        from gui.windows.experiment_window.ui_experiment_wiget import ExperimentWidget
-        w = btn_alarm_test.parent()
-        while w is not None:
-            if isinstance(w, ExperimentWidget):
-                w.alarm_test.emit()
-                return
-            w = w.parent()
+    def _with_icon(btn: QPushButton, kind: str, px: int = 18) -> QPushButton:
+        btn.setIcon(QIcon(make_icon(kind, "#e6e6e6", px)))
+        btn.setIconSize(QSize(px, px))
+        return btn
 
-    btn_alarm_test.clicked.connect(_emit_alarm)
+    # только значок, надпись — во всплывающей подсказке
+    btn_power_on  = _with_icon(QPushButton(), "power_on",  20)
+    btn_power_off = _with_icon(QPushButton(), "power_off", 20)
+    btn_power_on.setToolTip("Вкл. привод")
+    btn_power_off.setToolTip("Выкл. привод")
 
-    ctrl_title = QLabel("Управление")
-    ctrl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #1abc9c;")
-    lay.addWidget(ctrl_title)
+    # Режим управления — такая же карточка, как у показаний и состояния
+    # (значение обновляется извне через container._mode_label.setText)
+    mode_card = _Readout("Режим управления", "", _RO_MODE, sample="Автоматический")
+    mode_card.setText("Ручной")
+    container._mode_label = mode_card
 
-    btn_power_on  = QPushButton("Вкл. привод")
-    btn_power_off = QPushButton("Выкл. привод")
-
-    # Режим управления — текстовая индикация (значение обновляется извне)
-    lbl_mode = QLabel("Ручной")
-    lbl_mode.setObjectName("modeLabel")
-    lbl_mode.setStyleSheet(
-        "QLabel#modeLabel { font-family: 'Segoe UI Semibold', 'Segoe UI', sans-serif;"
-        " font-size: 15px; font-weight: bold; color: #1abc9c; background: transparent; }")
-    lbl_mode.setAlignment(Qt.AlignmentFlag.AlignHCenter)   # значение по центру подписи
-    container._mode_label = lbl_mode   # ссылка для обновления режима
-
-    btn_up = QPushButton("▲")
+    btn_up = _with_icon(QPushButton(), "arrow_up", 20)
     btn_up.setFixedSize(42, 42)
+    btn_up.setToolTip("Толчок назад")
 
-    btn_down = QPushButton("▼")
+    btn_down = _with_icon(QPushButton(), "arrow_down", 20)
     btn_down.setFixedSize(42, 42)
+    btn_down.setToolTip("Толчок вперёд")
 
     # запись команд в PLC (commands[...] через cmd-очередь):
     # Вкл./Выкл. привод — две кнопки (EN_DRIVER / DIS_DRIVER),
     # ▲/▼ — толчок (TRUE пока нажато, FALSE при отпускании)
-    from tag_binder import tags
     btn_power_on .clicked.connect(lambda: tags.write("cmdEnableDriver", 1))
     btn_power_off.clicked.connect(lambda: tags.write("cmdDisableDriver", 1))
     btn_up.pressed.connect(lambda: tags.write("cmdBackwardJog", 1))
@@ -567,19 +677,11 @@ def _make_section1() -> QWidget:
     # Каждая группа — в своём виджете-обёртке; в строке выравниваем по центру
     # по вертикали, чтобы колонки разной высоты не «уезжали».
 
-    # режим управления: подпись + значение
-    mode_col = QVBoxLayout(); mode_col.setContentsMargins(0, 0, 0, 0); mode_col.setSpacing(3)
-    mode_cap = QLabel("Режим управления")
-    mode_cap.setStyleSheet("color: #7f8c8d; font-size: 11px; background: transparent;")
-    mode_cap.setAlignment(Qt.AlignmentFlag.AlignHCenter)   # подпись по центру, как значение
-    mode_col.addWidget(mode_cap)
-    mode_col.addWidget(lbl_mode)
-    mode_w = QWidget(); mode_w.setLayout(mode_col)
-
     # вкл/выкл привод — одна над другой, равной ширины
-    btn_power_on.setMinimumWidth(120)
-    btn_power_off.setMinimumWidth(120)
-    power_col = QVBoxLayout(); power_col.setContentsMargins(0, 0, 0, 0); power_col.setSpacing(6)
+    # без надписи кнопки квадратные — как толчки ▲/▼ рядом
+    btn_power_on.setFixedSize(42, 42)
+    btn_power_off.setFixedSize(42, 42)
+    power_col = QHBoxLayout(); power_col.setContentsMargins(0, 0, 0, 0); power_col.setSpacing(6)
     power_col.addWidget(btn_power_on)
     power_col.addWidget(btn_power_off)
     power_w = QWidget(); power_w.setLayout(power_col)
@@ -601,13 +703,23 @@ def _make_section1() -> QWidget:
     arrows_row.addWidget(btn_down)
     arrows_w = QWidget(); arrows_w.setLayout(arrows_row)
 
-    # порядок слева направо: режим · вкл/выкл · скорость · стрелки.
+    # Режим и состояние — одной строкой над органами управления: обе карточки
+    # про то, в каком стенд сейчас положении, а не про управление им.
+    # Ширину делят поровну, как и ряд показаний ниже (см. vals_row).
+    container._state_card = state_card = _StateCard()
+    mode_row = QHBoxLayout(); mode_row.setSpacing(6)
+    for card in (mode_card, state_card):
+        card.setMinimumWidth(card.sizeHint().width())
+        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        mode_row.addWidget(card, 1)
+    lay.addLayout(mode_row)
+
+    # порядок слева направо: вкл/выкл · скорость · стрелки.
     # speed_w тянется (stretch=1) и забирает свободную ширину — остальные фиксированы,
     # поэтому стрелки всегда видны справа, а при узкой панели ужимается слайдер.
     _vc = Qt.AlignmentFlag.AlignVCenter
     motion_row = QHBoxLayout()
     motion_row.setSpacing(12)
-    motion_row.addWidget(mode_w,   0, _vc)
     motion_row.addWidget(power_w,  0, _vc)
     motion_row.addWidget(speed_w,  1, _vc)
     motion_row.addWidget(arrows_w, 0, _vc)
@@ -616,37 +728,54 @@ def _make_section1() -> QWidget:
     sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
     lay.addWidget(sep3)
 
-    # Текущая позиция
-    lbl_pos = QLabel("Текущая позиция: 0")
-    pos_row = QHBoxLayout()
-    pos_row.addWidget(lbl_pos)
-    pos_row.addStretch()
-    btn_zero_l = QPushButton("Обнулить L")
-    pos_row.addWidget(btn_zero_l)
-    lay.addLayout(pos_row)
+    # Показания стенда: позиция, нагрузка, скорость нагружения. Каждое — своя
+    # карточка со своим цветом, чтобы оператор находил нужное число не читая
+    # подписи. Кнопки обнуления живут внутри своих карточек.
+    btn_zero_l = QPushButton(" L"); btn_zero_l.setToolTip("Обнулить положение")
+    btn_zero_h = QPushButton(" Н"); btn_zero_h.setToolTip("Обнулить нагрузку")
+    for b in (btn_zero_l, btn_zero_h):
+        b.setFixedSize(40, 26)      # квадратнее: сплюснутые выглядели зажатыми
 
-    # Нагрузка
-    lbl_load = QLabel("Нагрузка, Н: 0")
-    load_row = QHBoxLayout()
-    load_row.addWidget(lbl_load)
-    load_row.addStretch()
-    btn_zero_h = QPushButton("Обнулить Н")
-    load_row.addWidget(btn_zero_h)
-    load_row.addStretch()
-    lbl_dh = QLabel("Скорость нагружения H, сек: 0")
-    load_row.addWidget(lbl_dh)
-    lay.addLayout(load_row)
+    # sample — самое широкое значение, какое сюда попадёт: под него отводится
+    # место, чтобы карточка не прыгала при смене числа и не занимала лишнего.
+    ro_pos   = _Readout("Позиция", "мм",  _RO_POS,  btn_zero_l, "1000.00")
+    ro_load  = _Readout("Нагрузка",        "Н",   _RO_LOAD, btn_zero_h, "5000.0")
+    # подпись короткая: «Н/с» уже говорит, что это скорость нагружения, а
+    # длинное слово растягивало карточку и ряд не влезал в ширину панели
+    ro_speed = _Readout("Скорость", "Н/с", _RO_SPEED, sample="999.0")
+    ro_speed.setText("0")
+
+    # Три показания в один ряд: нагрузка, позиция, скорость нагружения.
+    # Свободную ширину делят поровну, а не оставляют пустоту справа. Минимум —
+    # собственный размер карточки: ужиматься и обрезать подписи им нельзя,
+    # на узком окне ряд лучше выйдет за край с прокруткой.
+    vals_row = QHBoxLayout(); vals_row.setSpacing(6)
+    for card in (ro_load, ro_pos, ro_speed):
+        card.setMinimumWidth(card.sizeHint().width())
+        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        vals_row.addWidget(card, 1)
+    lay.addLayout(vals_row)
 
     # Ручное управление стендом. На время идущего испытания блокируется: приводом
     # распоряжается методика (секция 3), а обнуление датчиков посреди испытания
     # исказило бы показания. Переключает set_manual_controls_enabled().
+    # Позиция и нагрузка — живые значения с ПЛК, те же потоки, что у окошек
+    # секции 4: displacement (мм) и tenza (Н).
+    container._live_values = _LiveValues({
+        "displacement": (ro_pos,  "{}", 2),
+        "tenza":        (ro_load, "{}", 1),
+    }, parent=container)
+
+    # подсказки кнопок без надписей должны работать и когда панель заблокирована
+    container._tip_relay = _ToolTipRelay(container)
+    container.installEventFilter(container._tip_relay)
+
     container._manual_controls = [btn_power_on, btn_power_off, slider,
                                   btn_up, btn_down, btn_zero_l, btn_zero_h]
 
     sep_cam = QFrame(); sep_cam.setFrameShape(QFrame.Shape.HLine)
     lay.addWidget(sep_cam)
 
-    from PyQt6.QtWidgets import QSizePolicy
     cam1 = _CameraWidget(cam_idx=0)
     cam1.setMinimumHeight(180)
     cam1.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -657,7 +786,197 @@ def _make_section1() -> QWidget:
     cam2.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
     lay.addWidget(cam2, 1)
     scroll.setWidget(container)
-    return scroll, btn_alarm_test
+    return scroll
+
+
+# Цвета показаний. Разные у каждого, чтобы число опознавалось по цвету, а не по
+# подписи; те же оттенки, что у навигации и статусов стенда.
+_RO_POS   = "#3498db"    # положение — синий
+_RO_LOAD  = "#e67e22"    # нагрузка — оранжевый
+_RO_SPEED = "#1abc9c"    # скорость нагружения — бирюзовый
+_RO_MODE  = "#9b59b6"    # режим управления — фиолетовый
+
+
+class _Readout(QFrame):
+    """Показание стенда: подпись, крупное цветное значение, единица измерения.
+
+    Фон и рамка — сам цвет показания, разведённый до полупрозрачного, поэтому
+    карточка одинаково читается и на светлой, и на тёмной теме: она подмешивается
+    к тому фону, который под ней, а не задаёт свой.
+
+    Кнопка (обнуление) необязательна и уезжает вправо; её значок перекрашивается
+    в цвет карточки — белый на светлой теме терялся бы.
+    """
+
+    def __init__(self, caption: str, unit: str, color: str,
+                 button: QPushButton = None, sample: str = "1000.00"):
+        super().__init__()
+        self.setObjectName("readout")
+        self._btn = button
+        # шире содержимого не растём: карточки стоят слева, а не делят панель
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+
+        cap = QLabel(caption.upper())
+        cap.setStyleSheet("color: #7f8c8d; font-size: 10px; font-weight: 600;")
+
+        self._val = QLabel("—")
+        # Размер шрифта — через QFont, а не stylesheet: иначе fontMetrics() ниже
+        # мерил бы обычным шрифтом и место под значение вышло бы вдвое меньше.
+        f = self._val.font(); f.setPixelSize(18); f.setWeight(QFont.Weight.DemiBold)
+        self._val.setFont(f)
+        # место под самое широкое значение: единица не ездит вслед за числом
+        self._val.setFixedWidth(self._val.fontMetrics().horizontalAdvance(sample) + 2)
+        val_row = QHBoxLayout(); val_row.setContentsMargins(0, 0, 0, 0)
+        val_row.setSpacing(4)
+        val_row.addWidget(self._val, 0, Qt.AlignmentFlag.AlignBottom)
+        if unit:
+            # единица прижата к низу значения — на общей с ним базовой линии
+            unit_lbl = QLabel(unit)
+            unit_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+            val_row.addWidget(unit_lbl, 0, Qt.AlignmentFlag.AlignBottom)
+        val_row.addStretch()
+
+        col = QVBoxLayout(); col.setContentsMargins(0, 0, 0, 0); col.setSpacing(1)
+        col.addWidget(cap)
+        col.addLayout(val_row)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 5, 6, 5)
+        row.setSpacing(7)
+        row.addLayout(col, 1)
+        if button is not None:
+            button.setIconSize(QSize(17, 17))
+            row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.set_accent(color)
+
+    def set_accent(self, color: str):
+        """Перекрасить карточку целиком: рамку, фон, значение и значок кнопки."""
+        self.setStyleSheet(
+            f"#readout {{ background: {_rgba(color, 30)};"
+            f" border: 1px solid {_rgba(color, 90)};"
+            f" border-left: 3px solid {color};"
+            f" border-radius: 6px; }}"
+            " #readout QLabel { background: transparent; }"
+        )
+        self._val.setStyleSheet(f"color: {color};")   # размер задан шрифтом
+        if self._btn is not None:
+            self._btn.setIcon(QIcon(make_icon("zero", color, 18)))
+
+    def setText(self, text: str):
+        """Показать значение (совместимо с QLabel — так его правит _LiveValues)."""
+        self._val.setText(text)
+
+
+class _StateCard(_Readout):
+    """Состояние стенда одним словом: Готовность · Работа · Авария.
+
+    Считается по фактическим состояниям, а не по цвету индикаторов: авария —
+    st:GENERAL_FAULT, работа — идущее испытание либо движущийся привод
+    (st:FW_JOGGING / st:BW_JOGGING), готовность — питание и исправные датчики
+    без аварии.
+
+    Когда ни одно не выполняется (нет связи, снято питание, отказали датчики),
+    слова нет: показываем прочерк, а причину — подсказкой. Врать «Готовность»
+    при неготовом стенде нельзя, а четвёртого слова в списке не задано.
+    """
+
+    _READY = "#2ecc71"
+    _RUN   = "#3498db"
+    _FAULT = "#e74c3c"
+    _NONE  = "#7f8c8d"
+
+    def __init__(self):
+        # место под самое длинное слово, иначе карточка меняла бы ширину
+        super().__init__("Состояние", "", self._NONE, sample="Готовность")
+        self._running = False
+        bus.tag_state.connect(self._on_tag)
+        link.changed.connect(lambda *_: self._refresh())
+        self._refresh()
+
+    def set_test_running(self, running: bool):
+        """Испытание идёт (секция 3 запустила методику)."""
+        self._running = running
+        self._refresh()
+
+    _WATCHED = ("st:GENERAL_FAULT", "st:DRIVE_POWER", "st:SENSORS_GOOD",
+                "st:FW_JOGGING", "st:BW_JOGGING")
+
+    def _on_tag(self, name: str, _value):
+        if name in self._WATCHED:
+            self._refresh()
+
+    def _refresh(self):
+        word, color, tip = self._state()
+        self.setText(word)
+        self.set_accent(color)
+        self.setToolTip(tip)
+
+    def _state(self):
+        if link.state != link.UP:
+            return "—", self._NONE, "Нет связи с ПЛК: состояние неизвестно"
+        if tags.last("st:GENERAL_FAULT"):
+            return "Авария", self._FAULT, "Авария на стенде"
+        if self._running or tags.last("st:FW_JOGGING") or tags.last("st:BW_JOGGING"):
+            return "Работа", self._RUN, "Идёт нагружение"
+        if not tags.last("st:DRIVE_POWER"):
+            return "—", self._NONE, "Привод обесточен"
+        if not tags.last("st:SENSORS_GOOD"):
+            return "—", self._NONE, "Датчики неисправны"
+        return "Готовность", self._READY, "Стенд готов к нагружению"
+
+
+def _rgba(hex_color: str, alpha: int) -> str:
+    """Цвет темы, разведённый до полупрозрачного (alpha 0…255)."""
+    c = QColor(hex_color)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha})"
+
+
+class _LiveValues(QObject):
+    """Живые значения датчиков в карточках «Позиция» и «Нагрузка».
+
+    Источник тот же, что у окошек секции 4 — поток bus.stream_points (имена
+    потоков заданы в servers.json, logging.ring → points_msg). Из батча берём
+    последнее значение, а метки обновляем по таймеру: батчи приходят ~10 раз в
+    секунду, чаще перерисовывать текст незачем.
+    """
+
+    REFRESH_MS = 200
+
+    def __init__(self, labels: dict, parent=None):
+        # labels: имя потока → (метка, шаблон, точность)
+        super().__init__(parent)
+        self._labels = labels
+        self._last: dict = {}
+        bus.stream_points.connect(self._on_points)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start(self.REFRESH_MS)
+
+    def _on_points(self, name: str, _times: list, vals: list):
+        if vals and name in self._labels:
+            self._last[name] = vals[-1]
+
+    def _refresh(self):
+        for name, (lbl, tpl, prec) in self._labels.items():
+            val = self._last.get(name)
+            lbl.setText(tpl.format("—" if val is None else f"{float(val):.{prec}f}"))
+
+
+class _ToolTipRelay(QObject):
+    """Показывает подсказку дочерней кнопки, даже когда та заблокирована.
+
+    Qt не показывает подсказки неактивных виджетов и адресует событие родителю.
+    На время испытания панель управления блокируется, а подсказки у кнопок без
+    надписей — единственное объяснение, что они делают, поэтому рисуем сами.
+    """
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.ToolTip:
+            child = obj.childAt(ev.pos())
+            if child is not None and child.toolTip():
+                QToolTip.showText(ev.globalPos(), child.toolTip(), obj)
+                return True
+        return False
 
 
 def set_manual_controls_enabled(section1: QWidget, enabled: bool) -> None:
@@ -668,3 +987,11 @@ def set_manual_controls_enabled(section1: QWidget, enabled: bool) -> None:
     inner = section1.widget() if isinstance(section1, QScrollArea) else section1
     for w in getattr(inner, "_manual_controls", []):
         w.setEnabled(enabled)
+
+
+def set_test_running(section1: QWidget, running: bool) -> None:
+    """Сообщить панели, что идёт испытание — карточка состояния покажет «Работа»."""
+    inner = section1.widget() if isinstance(section1, QScrollArea) else section1
+    card = getattr(inner, "_state_card", None)
+    if card is not None:
+        card.set_test_running(running)

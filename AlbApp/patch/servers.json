@@ -7,12 +7,14 @@
       "reconnect_interval": 5,
       "ns": 4,
       "base": "|var|CODESYS Control Win V3 x64.Application.MAIN_VIRTUAL.API.",
-      "index_enum": ["b_names", "c_names"],
+      "index_enum": ["b_names", "c_names", "st_names"],
       "tags": {
         "b_names": "b_names",
         "c_names": "c_names",
         "s_names": "s_names",
-        "general_fault": "generalFault",
+        "st_names": "st_names",
+        "initStatuses": "initStatuses",
+        "general_fault": "initStatuses[GENERAL_FAULT]",
         "cc": "i_data",
         "tenzaSensorDataArr": "data_buffer[TENZA_ONE].value",
         "displacementSensorArr": "data_buffer[DISPLACEMENT_ONE].value",
@@ -37,14 +39,22 @@
           "name": "arrays",
           "interval": 0.1,
           "sequential": true,
-          "tags": ["cc", "displacementSensorArr", "tenzaSensorDataArr", "cmd_status"]
+          "tags": ["cc", "displacementSensorArr", "tenzaSensorDataArr", "cmd_status",
+                   "initStatuses"]
         }
       ],
-      "status": {
-        "array": "cmd_status",
-        "enum": "s_names",
-        "prefix": "st:"
-      },
+      "status": [
+        {
+          "array": "cmd_status",
+          "enum": "s_names",
+          "prefix": "st:"
+        },
+        {
+          "array": "initStatuses",
+          "enum": "st_names",
+          "prefix": "st:"
+        }
+      ],
       "logging": {
         "index_tag": "cc",
         "record": {

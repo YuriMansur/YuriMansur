@@ -2,9 +2,11 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFormLayout,
     QDateTimeEdit, QComboBox, QLineEdit, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QDateTime, pyqtSignal
+from PyQt6.QtCore import Qt, QDateTime, pyqtSignal, QSize
+from PyQt6.QtGui import QIcon
 
 import param_config
+from gui.icons import make_icon
 
 _TITLE_STYLE = "font-size: 15px; font-weight: bold; color: #1abc9c;"
 
@@ -35,7 +37,9 @@ class Section2Widget(QWidget):
         layout.setSpacing(4)
 
         from PyQt6.QtWidgets import QPushButton, QDialog
-        btn_docs = QPushButton("📄 Документация (ГОСТ)")
+        btn_docs = QPushButton(" Документация (ГОСТ)")
+        btn_docs.setIcon(QIcon(make_icon("doc", "#1abc9c", 18)))
+        btn_docs.setIconSize(QSize(18, 18))
         btn_docs.setMinimumHeight(36)
         btn_docs.setStyleSheet("font-size: 14px; padding: 6px 16px; border: 2px solid #1abc9c; border-radius: 4px;")
         from pathlib import Path
@@ -108,6 +112,12 @@ class Section2Widget(QWidget):
         self.cb_std.addItems(param_config.gosts())
         form2.addRow("Стандарт проведения испытаний:", self.cb_std)
 
+        # методика — сразу за ГОСТом: она от него зависит и вместе с ним
+        # определяет остальные параметры
+        self.cb_method = QComboBox()
+        self._lbl_method = QLabel("Методика:")
+        form2.addRow(self._lbl_method, self.cb_method)
+
         self.cb_load = QComboBox()
         form2.addRow("Уровень нагружения:", self.cb_load)
 
@@ -120,10 +130,6 @@ class Section2Widget(QWidget):
         self.cb_cond = QComboBox()
         self._lbl_cond = QLabel("Условие нагружения:")
         form2.addRow(self._lbl_cond, self.cb_cond)
-
-        self._cond_gap = QLabel()
-        self._cond_gap.setVisible(False)
-        form2.addRow(self._cond_gap)
 
         # Поля сил живут в отдельной форме фиксированной высоты. Строки скрытых
         # полей схлопываются, поэтому видимые идут подряд, без пустых промежутков;
@@ -157,15 +163,16 @@ class Section2Widget(QWidget):
             f_host.setFixedHeight(round(row_h * max_rows))
         form2.addRow(f_host)
 
-        spacer_lbl = QLabel()
-        spacer_lbl.setFixedHeight(8)
-        form2.addRow(spacer_lbl)
-
-        self.cb_method = QComboBox()
-        self._lbl_method = QLabel("Методика:")
-        form2.addRow(self._lbl_method, self.cb_method)
+        # Отступ под блоком параметров. Он же добирает высоту, когда у ГОСТа нет
+        # условия нагружения: строка условия убирается, поля сил поднимаются на
+        # её место, а общая высота блока не меняется — «Информация об образце»
+        # ниже остаётся на месте.
+        self._spacer_lbl = QLabel()
+        self._spacer_lbl.setFixedHeight(self._SPACER_H)
+        form2.addRow(self._spacer_lbl)
 
         self._form2 = form2
+        self._align_f_labels()
         grp2.addLayout(form2)
 
         layout.addSpacing(20)
@@ -233,11 +240,11 @@ class Section2Widget(QWidget):
         if has_cond:
             self.cb_cond.addItems(conds)
         self.cb_cond.blockSignals(False)
-        # нет условий у ГОСТа → виджеты скрыты, но место строки сохраняется
-        # (retainSizeWhenHidden) — блок остаётся жёстким, ничего не прыгает
+        # нет условий у ГОСТа → строка убирается целиком, поля сил поднимаются
+        # на её место, а высоту добирает нижний отступ
         self.cb_cond.setVisible(has_cond)
         self._lbl_cond.setVisible(has_cond)
-        self._sync_cond_height()
+        self._sync_bottom_spacer()
 
         self.cb_method.blockSignals(True)
         self.cb_method.clear()
@@ -246,22 +253,43 @@ class Section2Widget(QWidget):
 
         self._refresh_f()
 
-    def _sync_cond_height(self):
-        """Держать место строки условия, когда её у ГОСТа нет.
+    def _align_f_labels(self):
+        """Подогнать колонку подписей полей сил под колонку основной формы.
 
-        Заглушка показывается вместо скрытой строки и повторяет её высоту.
+        Поля сил живут во вложенной форме (ей задана фиксированная высота), а у
+        вложенной формы своя ширина подписей — из-за этого поля начинались левее
+        комбобоксов. Приравниваем ширину подписей к самой широкой подписи внешней
+        формы, тогда обе колонки значений совпадают.
+        """
+        outer = [self._form2.labelForField(f)
+                 for f in (self.cb_std, self.cb_load, self.cb_cond, self.cb_method)]
+        w = max((l.sizeHint().width() for l in outer if l is not None), default=0)
+        if not w:
+            return
+        for lbl in self._f_labels.values():
+            lbl.setFixedWidth(w)
+            # подпись занимает всю колонку, поэтому текст в ней прижимаем вправо —
+            # иначе он оказался бы у левого края, а не у поля
+            lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+    _SPACER_H = 8          # обычный отступ под блоком параметров
+
+    def _sync_bottom_spacer(self):
+        """Добрать нижним отступом высоту убранной строки условия.
+
+        Так поля сил поднимаются, а блок в целом не меняет высоту — то, что
+        ниже («Информация об исследуемом образце»), не съезжает.
         Высоту берём у самого комбобокса: тему применяют позже
-        (ExperimentWidget.set_theme задаёт комбобоксам свою высоту), поэтому
-        зафиксировать её на старте нельзя — строка обрезалась бы.
+        (ExperimentWidget.set_theme задаёт комбобоксам свою высоту).
         """
         # isVisibleTo, а не isVisible: на старте виджет ещё не показан, и
         # isVisible() дал бы False даже для строки, которая должна быть видна
-        hidden = not self.cb_cond.isVisibleTo(self)
-        if hidden:
+        extra = 0
+        if not self.cb_cond.isVisibleTo(self):
             h = max(self.cb_cond.minimumHeight(), self.cb_cond.sizeHint().height(),
                     self._lbl_cond.sizeHint().height())
-            self._cond_gap.setFixedHeight(h)
-        self._cond_gap.setVisible(hidden)
+            extra = h + max(0, self._form2.spacing())
+        self._spacer_lbl.setFixedHeight(self._SPACER_H + extra)
 
     def _refresh_f(self):
         gost    = self.cb_std.currentText()

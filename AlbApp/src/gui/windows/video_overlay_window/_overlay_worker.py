@@ -5,6 +5,7 @@
 InfluxDB за длительность записи, график рисуется средствами cv2.
 """
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -27,6 +28,26 @@ CHANNELS = [
 def _hex_to_bgr(h: str) -> tuple:
     h = h.lstrip("#")
     return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))
+
+
+def _find_sidecar(video_path: str) -> str:
+    """Путь к таблице «кадр → время» для ролика.
+
+    Сначала ищем рядом одноимённый .csv, затем — общий для обеих камер: их
+    ролики называются `rec_<стамп>_cam1.avi` / `_cam2.avi`, а сайдкар на них
+    один — `rec_<стамп>.csv`. Возвращаем найденный путь, иначе одноимённый
+    (по нему выше выводится сообщение «нет сайдкара»).
+    """
+    stem = os.path.splitext(video_path)[0]
+    own = stem + ".csv"
+    if os.path.exists(own):
+        return own
+    m = re.match(r"^(.*)_cam\d+$", stem)
+    if m:
+        shared = m.group(1) + ".csv"
+        if os.path.exists(shared):
+            return shared
+    return own
 
 
 def _render_label_bgra(text: str, rgb: tuple, font_px: int = 13) -> np.ndarray:
@@ -171,7 +192,7 @@ from(bucket: "{INFLUX_BUCKET}")
             if self._abort:
                 break
             base = os.path.basename(video_path)
-            sidecar = os.path.splitext(video_path)[0] + ".csv"
+            sidecar = _find_sidecar(video_path)
             demo = self._opts.get("demo")
             if os.path.exists(sidecar):
                 ts = pd.read_csv(sidecar)["timestamp"].to_numpy(dtype=np.float64)
@@ -267,7 +288,7 @@ from(bucket: "{INFLUX_BUCKET}")
         # рисование QPainter вне GUI-потока на Windows может зависнуть.
         labels_hires = self._opts.get("labels_hires") or [None] * len(series)
         base_px = self._opts.get("label_base_px", 40)
-        font_px = max(10, min(18, ow // 28))   # длинные имена должны влезать, сверху кап
+        font_px = max(11, min(18, ow // 26))   # длинные имена должны влезать, сверху кап
         scale = font_px / base_px
         labels = []
         for idx, s in enumerate(series):
@@ -290,7 +311,7 @@ from(bucket: "{INFLUX_BUCKET}")
                 break
             t = float(ts[i]) if i < total else float(ts[-1])
             self._draw_overlay(frame, t, series, labels, row_h, win_secs,
-                               x0, y0, x1, y1, ymin, ymax, opacity)
+                               x0, y0, x1, y1, ymin, ymax, opacity, font_px)
             writer.write(frame)
             i += 1
             if i % 25 == 0 or i == total:
@@ -310,7 +331,14 @@ from(bucket: "{INFLUX_BUCKET}")
     # ── отрисовка одного оверлея ──────────────────────────────────────────────
 
     def _draw_overlay(self, frame, t, series, labels, row_h, win_secs,
-                      x0, y0, x1, y1, ymin, ymax, opacity):
+                      x0, y0, x1, y1, ymin, ymax, opacity, font_px=14):
+        # Цифры набираем векторным шрифтом OpenCV: у него на масштабе 1.0 высота
+        # прописной ≈ 22 px, отсюда пересчёт из font_px. Так значения выходят
+        # вровень с названиями каналов, а не вдвое мельче, как было.
+        val_sc  = font_px / 24.0
+        time_sc = font_px / 28.0
+        thick   = 2 if font_px >= 17 else 1
+
         # фон панели (полупрозрачный тёмный)
         roi = frame[y0:y1, x0:x1]
         bg = np.full_like(roi, (40, 40, 40))
@@ -318,7 +346,7 @@ from(bucket: "{INFLUX_BUCKET}")
 
         pad = 8
         px0, py0 = x0 + pad, y0 + pad
-        px1, py1 = x1 - pad, y1 - 18      # снизу место под метку времени
+        px1, py1 = x1 - pad, y1 - (font_px + 8)   # снизу место под метку времени
         pw, ph = px1 - px0, py1 - py0
         if pw < 10 or ph < 10:
             return
@@ -379,18 +407,20 @@ from(bucket: "{INFLUX_BUCKET}")
                 j = int(np.searchsorted(ct, t, "right")) - 1
                 if j >= 0:
                     cur = f"  {cv[j]:.2f}"
-            cv2.line(frame, (px0 + 4, ly + 7), (px0 + 18, ly + 7), _hex_to_bgr(color), 2)
+            # образец цвета — по середине строки, чтобы не уезжал от крупных цифр
+            sy = ly + row_h // 2
+            cv2.line(frame, (px0 + 4, sy), (px0 + 18, sy), _hex_to_bgr(color), thick)
             lx = px0 + 24
             if lbl is not None:
                 _blit_bgra(frame, lbl, lx, ly)
                 lx += lbl.shape[1]
             if cur:
-                cv2.putText(frame, cur, (lx, ly + 12), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.4, _hex_to_bgr(color), 1, cv2.LINE_AA)
+                cv2.putText(frame, cur, (lx, ly + font_px), cv2.FONT_HERSHEY_SIMPLEX,
+                            val_sc, _hex_to_bgr(color), thick, cv2.LINE_AA)
             ly += row_h
 
         # метка времени текущего кадра (ASCII)
         import datetime as _dt
         tstr = _dt.datetime.fromtimestamp(t).strftime("%H:%M:%S")
         cv2.putText(frame, tstr, (px0, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.42, (210, 210, 210), 1, cv2.LINE_AA)
+                    time_sc, (210, 210, 210), 1, cv2.LINE_AA)

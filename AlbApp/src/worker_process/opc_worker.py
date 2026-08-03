@@ -115,7 +115,13 @@ _REC_START         = set((_LOGGING or {}).get("record", {}).get("start", []))
 _REC_STOP          = set((_LOGGING or {}).get("record", {}).get("stop", []))
 _INDEX_ENUM        = _SRV.get("index_enum")       # имя тега-энума для резолва [ИМЯ]→[индекс]
 _STATIC_ENUMS      = _SRV.get("enums") or {}      # статические карты имя→индекс (напр. команды)
-_STATUS            = _SRV.get("status") or {}     # {array, enum, prefix} — статусы команд для подсветки
+# Блоки статусов: {array, enum, prefix}. Их может быть несколько (статусы команд
+# и статусы готовности стенда — разные массивы со своими энумами имён), поэтому
+# конфиг принимает и один блок, и список.
+_STATUS_CFG        = _SRV.get("status") or []
+if isinstance(_STATUS_CFG, dict):
+    _STATUS_CFG = [_STATUS_CFG]
+_STATUS            = _STATUS_CFG[0] if _STATUS_CFG else {}   # первый — для обратной совместимости
 _STATUS_ENUM_TAG   = _STATUS.get("enum")          # тег-энум имён статусов (s_names)
 _STATUS_PREFIX     = _STATUS.get("prefix", "")    # префикс имени статуса в шине (напр. "st:")
 
@@ -128,6 +134,9 @@ RAW_ARRAY_MAP = {r["node"]: r["raw_array_msg"]
 _TAGS        = _SRV["tags"]                            # имя → NodeId
 _NAME_BY_NID = {nid: name for name, nid in _TAGS.items()}  # NodeId → имя
 _STATUS_ARRAY_NID = _TAGS.get(_STATUS.get("array"))   # NodeId массива статусов (или None)
+# все блоки статусов: NodeId массива → (тег-энум имён, префикс имени в шине)
+_STATUS_BLOCKS = {_TAGS[b["array"]]: (b.get("enum"), b.get("prefix", ""))
+                  for b in _STATUS_CFG if b.get("array") in _TAGS}
 
 
 def _normalize_nid(nid_str: str) -> str:
@@ -247,18 +256,28 @@ async def _run_connected(client: Client, live_q, cmd_q, procs: list):
     # создании узла разворачиваются в числовые, ключи сопоставления остаются как в конфиге
     enum_map = await _read_enum_map(client)
 
+    # Обратная карта NodeId → имя тега должна знать и развёрнутые пути: подписка
+    # получает узел от сервера уже с числовым индексом (initStatuses[2]), а в
+    # конфиге он записан символьно (initStatuses[GENERAL_FAULT]) — без этого
+    # уведомление приходило бы с именем None.
+    _NAME_BY_NID.update({_normalize_nid(_resolve_indices(nid, enum_map)): name
+                         for name, nid in _TAGS.items()})
+
     # карта имён статусов s_names → индекс в массиве cmd_status (отдельно от enum_map,
     # т.к. индексы разных энумов совпадают — нужен именно набор s_names)
-    status_map  = await _read_enum_for(client, _STATUS_ENUM_TAG)
+    # для каждого блока статусов своя карта имён: индексы разных энумов совпадают
+    status_maps = {nid: (await _read_enum_for(client, enum), prefix)
+                   for nid, (enum, prefix) in _STATUS_BLOCKS.items()}
     status_last: dict = {}   # имя статуса → последнее булево (шлём в GUI только по фронту)
 
     # Размер кольца не задаём и не читаем отдельным тегом: RingProc берёт его из
     # длины самого массива при первом же чтении (см. RingProc.on_data). Фактический
     # темп он же измеряет и отдаёт в GUI через on_rate.
 
-    if _STATUS:
-        print(f"[worker] статусы: array={_STATUS.get('array')} nid={_STATUS_ARRAY_NID} "
-              f"s_names={status_map}")
+    for b in _STATUS_CFG:
+        nid = _TAGS.get(b.get("array"))
+        print(f"[worker] статусы: array={b.get('array')} prefix={b.get('prefix', '')} "
+              f"{b.get('enum')}={status_maps.get(nid, ({}, ''))[0]}")
 
     # Кэш объектов узлов: ключ — как в конфиге (для сопоставления в RingProc),
     # сам узел — с числовым индексом (для чтения на сервере)
@@ -345,16 +364,17 @@ async def _run_connected(client: Client, live_q, cmd_q, procs: list):
                                    'data': list(val) if val else []})
             # cmd_status → именованные статусы (st:<имя>) для подсветки кнопок в GUI.
             # Раскладываем массив по s_names; шлём tag_state только по фронту.
-            if nid == _STATUS_ARRAY_NID and status_map:
+            if nid in status_maps:
+                smap, prefix = status_maps[nid]
                 arr = list(val) if val else []
-                for sname, sidx in status_map.items():
+                for sname, sidx in smap.items():
                     if sidx < len(arr):
                         b = bool(arr[sidx])
-                        if status_last.get(sname) != b:
-                            status_last[sname] = b
-                            print(f"[worker] статус {_STATUS_PREFIX}{sname} = {b}")
-                            live_q.put_nowait({'type': 'tag',
-                                               'name': _STATUS_PREFIX + sname, 'val': b})
+                        full = prefix + sname
+                        if status_last.get(full) != b:
+                            status_last[full] = b
+                            print(f"[worker] статус {full} = {b}")
+                            live_q.put_nowait({'type': 'tag', 'name': full, 'val': b})
 
         # keepalive: проверка живости соединения — детект обрыва даже без data-тегов
         await status_node.read_value()   # исключение → выход → reconnect

@@ -5,11 +5,17 @@ from PyQt6.QtWidgets import (
     QColorDialog, QFileDialog,                        # диалоги выбора цвета и сохранения файла
     QFrame, QDateEdit, QTimeEdit,                     # рамка навигации, поля ввода даты/времени
     QLabel, QSpinBox, QComboBox,
-    QSlider, QWidgetAction, QCheckBox,                # слайдер прозрачности, чекбокс точек
+    QSlider, QWidgetAction, QCheckBox, QMenu,         # слайдер прозрачности, меню строки
+    QSizePolicy,                                      # панель каналов — по содержимому
     QDialog, QDialogButtonBox,                        # диалог выбора каналов для выгрузки
 )
-from PyQt6.QtCore import Qt, QDateTime, QTimer  # флаги Qt, работа с датой/временем, таймер скролла
-from PyQt6.QtGui import QShortcut, QKeySequence, QAction, QColor  # горячие клавиши, пункты меню, цвет
+from PyQt6.QtCore import Qt, QDateTime, QTimer, QSize  # флаги Qt, дата/время, таймер, размер значка
+from PyQt6.QtGui import (
+    QShortcut, QKeySequence, QAction, QColor, QIcon, QPalette,  # клавиши, меню, цвет, значок, палитра
+)
+from PyQt6.QtWidgets import QApplication      # палитра приложения → цвета панелей
+
+from gui.icons import make_icon                 # значки панели: глаз, режимы
 import pyqtgraph as pg                          # графическая библиотека (PlotWidget, InfiniteLine и др.)
 pg.setConfigOptions(antialias=True, useOpenGL=True)
 from event_bus import bus      # шина событий: получение точек от worker'а
@@ -34,6 +40,10 @@ from ._pg_menu_utils import (
 # цвета каналов по умолчанию
 _CH_COLORS = ["#e67e22", "#3498db", "#2ecc71"]
 
+# толщина линии: одна на все каналы, из панели не настраивается — выбор убран,
+# менять можно только программно через _set_ch_width
+_CH_WIDTH = 2
+
 # имена каналов (индекс 0 = канал 1)
 _CH_NAMES = [
     "Текущая уставка нагружения",
@@ -41,15 +51,57 @@ _CH_NAMES = [
     "Датчик перемещения",
 ]
 
+_ARROW_CACHE: dict[str, str] = {}
+
+
+def _arrow_url(kind: str, color: str) -> str:
+    """Путь к PNG-стрелке для QSpinBox.
+
+    Стрелки счётчика stylesheet умеет задавать только картинкой: как только у
+    ::up-button появляется свой фон, штатные Qt рисовать перестаёт, а нарисовать
+    треугольник правилами CSS в Qt нечем. Поэтому берём тот же значок, что и
+    везде в приложении, и один раз кладём его в кэш-каталог.
+    """
+    key = f"{kind}_{color.lstrip('#')}"
+    path = _ARROW_CACHE.get(key)
+    if path is None:
+        import os, tempfile
+        d = os.path.join(tempfile.gettempdir(), "albapp_icons")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, key + ".png").replace("\\", "/")
+        make_icon(kind, color, 16).save(path)
+        _ARROW_CACHE[key] = path
+    return path
+
+
+def _theme(dark: bool) -> tuple[str, str, str, str, str]:
+    """Цвета панелей трендов: (фон, текст, фон элементов, рамка, углубление).
+
+    Берём из палитры приложения, а не своим набором: раньше панели были
+    сине-серые (#2c3e50), и вкладка трендов выбивалась из остального окна.
+    Если палитра ещё не выставлена (тесты, отдельный запуск виджета) —
+    подставляем те же значения, что задаёт главное окно.
+    """
+    fallback = (("#282828", "#e0e0e0", "#2d2d2d", "#3c3c3c", "#161616") if dark
+                else ("#e9e9e9", "#141414", "#e1e1e1", "#b4b4b4", "#ffffff"))
+    app = QApplication.instance()
+    pal = app.palette() if app is not None else None
+    R = QPalette.ColorRole
+    # палитра могла ещё не смениться на нужную тему — тогда берём запасную
+    if pal is None or (pal.color(R.Window).lightness() < 128) != dark:
+        return fallback
+    return (pal.color(R.AlternateBase).name(),
+            pal.color(R.WindowText).name(),
+            pal.color(R.Button).name(),
+            pal.color(R.Mid).name(),
+            pal.color(R.Base).name())
+
+
 def _panel_style(dark: bool) -> str:
-    if dark:
-        bg, text, ctrl_bg, border = "#2c3e50", "#ecf0f1", "#3d5166", "#4a6278"
-    else:
-        bg, text, ctrl_bg, border = "#dde3ea", "#1a1a1a", "#c5cdd6", "#a0aab4"
+    bg, text, ctrl_bg, border, _base = _theme(dark)
     return f"""
     QFrame#chPanel {{
         background-color: {bg};
-        border-bottom: 2px solid #3498db;
     }}
     QWidget {{
         background-color: {bg};
@@ -70,6 +122,17 @@ def _panel_style(dark: bool) -> str:
         background: {border};
         border: none;
         width: 14px;
+    }}
+    QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+        background: #3498db;
+    }}
+    QSpinBox::up-arrow {{
+        image: url({_arrow_url("arrow_up", text)});
+        width: 8px; height: 8px;
+    }}
+    QSpinBox::down-arrow {{
+        image: url({_arrow_url("arrow_down", text)});
+        width: 8px; height: 8px;
     }}
     QCheckBox {{
         color: {text};
@@ -106,40 +169,37 @@ def _panel_style(dark: bool) -> str:
 """
 
 
+# цвета режимов: live — «идёт сейчас», архив — «поднято из базы»
+_MODE_COLORS = {"live": "#2ecc71", "archive": "#3498db"}
+
+
 def _nav_style(dark: bool) -> str:
-    bg = "#2c3e50" if dark else "#dde3ea"
-    return f"QFrame {{ background-color: {bg}; border-bottom: 2px solid #3498db; }}"
+    """Панель режимов: подпись, сегментный переключатель, кнопки Live/Архив.
 
-
-def _btn_mode_style(dark: bool) -> str:
-    text    = "#ecf0f1" if dark else "#1a1a1a"
-    btn_bg  = "#3d5166" if dark else "#c5cdd6"
-    btn_brd = "#4a6278" if dark else "#a0aab4"
-    btn_hov = "#4a6a82" if dark else "#b0bcc8"
-    return f"""
-        QPushButton {{
-            color: {text};
-            background-color: {btn_bg};
-            border: 1px solid {btn_brd};
-            border-radius: 4px;
-            padding: 4px 16px;
-            font-size: 13px;
-            min-width: 80px;
-        }}
-        QPushButton:checked {{
-            background-color: #3498db;
-            border: 1px solid #2980b9;
-            color: white;
-            font-weight: bold;
-        }}
-        QPushButton:hover:!checked {{
-            background-color: {btn_hov};
-        }}
+    Выбранный сегмент заливается цветом своего режима, невыбранный остаётся
+    плоским — оператор видит текущий режим, не читая надписей.
     """
-
-
-# оставляем для совместимости с местами, где используется напрямую
-_PANEL_STYLE = _panel_style(True)
+    bg, text, _ctrl, seg_brd, seg_bg = _theme(dark)
+    return f"""
+    QFrame {{ background-color: {bg}; }}
+    QFrame#modeSeg {{
+        background: {seg_bg}; border: 1px solid {seg_brd};
+        border-bottom: 1px solid {seg_brd}; border-radius: 6px;
+    }}
+    QFrame#modeSeg QPushButton {{
+        color: {text}; background: transparent; border: none;
+        border-radius: 4px; padding: 4px 14px; font-size: 12px; min-width: 64px;
+    }}
+    QFrame#modeSeg QPushButton:hover:!checked {{
+        background: {_rgba(text, 26)};
+    }}
+    QFrame#modeSeg QPushButton#mode_live:checked {{
+        background: {_MODE_COLORS['live']}; color: #ffffff; font-weight: bold;
+    }}
+    QFrame#modeSeg QPushButton#mode_archive:checked {{
+        background: {_MODE_COLORS['archive']}; color: #ffffff; font-weight: bold;
+    }}
+    """
 
 
 class TrendsWiget(QWidget):
@@ -155,6 +215,8 @@ class TrendsWiget(QWidget):
         self._archive_workers: list   = []   # плоский список всех активных воркеров
         self._workers_done            = 0
         self._total_archive_workers   = 0
+        self._arch_full:   tuple = None      # весь заказанный диапазон, сек Unix
+        self._arch_window: tuple = None      # что реально загружено сейчас
         self._auto_scroll: bool  = True
         self._y_range:     tuple = (0.0, 1.0)
         self._ts_offset:   float = 0.0       # нормализация X для OpenGL (вычитается из timestamps)
@@ -188,107 +250,100 @@ class TrendsWiget(QWidget):
         row_mode.setContentsMargins(6, 4, 6, 4)
         row_mode.setSpacing(6)
 
-        self.cb_mode = QComboBox()
-        self.cb_mode.addItem("● Live", "live")
-        self.cb_mode.addItem("Архив",  "archive")
-        # activated — только пользовательский выбор (программная смена индекса не дёргает)
-        self.cb_mode.activated.connect(lambda _i: self._set_mode(self.cb_mode.currentData()))
-        row_mode.addWidget(QLabel("Режим:"))
-        row_mode.addWidget(self.cb_mode)
+        # Сегментный переключатель вместо выпадающего списка: режима всего два,
+        # оба должны быть видны сразу — какой сейчас включён, читается без клика.
+        self._mode_btns = {}
+        seg = QFrame(); seg.setObjectName("modeSeg")
+        seg_row = QHBoxLayout(seg)
+        seg_row.setContentsMargins(2, 2, 2, 2); seg_row.setSpacing(2)
+        for mode, text, kind in (("live", "Live", "record"), ("archive", "Архив", "doc")):
+            btn = QPushButton(" " + text)
+            btn.setObjectName(f"mode_{mode}")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setIconSize(QSize(14, 14))
+            btn.clicked.connect(lambda _c=False, m=mode: self._set_mode(m))
+            seg_row.addWidget(btn)
+            self._mode_btns[mode] = (btn, kind)
+        row_mode.addWidget(seg)
+        self._row_mode = row_mode      # сюда же встаёт панель архива (см. ниже)
         row_mode.addStretch()
         root.addWidget(nav_frame)
 
-        # ── строка: панель каналов + панель архива ───────────────────────────
-        controls_row = QHBoxLayout()
-        controls_row.setContentsMargins(0, 0, 0, 0)
-        controls_row.setSpacing(4)
-        root.addLayout(controls_row)
-
+        # ── панель каналов ───────────────────────────────────────────────────
         self._ch_frame = QFrame()
         self._ch_frame.setObjectName("chPanel")
         self._ch_frame.setStyleSheet(_panel_style(True))
         ch_frame = self._ch_frame
-        ch_outer = QVBoxLayout(ch_frame)
-        ch_outer.setContentsMargins(4, 2, 4, 2)
-        ch_outer.setSpacing(1)
-        controls_row.addWidget(ch_frame)
+        # строки каналов — в ряд: панель занимает одну строку по высоте и
+        # оставляет графику больше места
+        ch_outer = QHBoxLayout(ch_frame)
+        ch_outer.setContentsMargins(4, 3, 4, 3)
+        ch_outer.setSpacing(6)
+        # панель по содержимому: расти вширь ей незачем, пустое место справа
+        # только делало её похожей на недозаполненную таблицу
+        ch_frame.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+        # каналы и панель архива — одной строкой, архив справа от каналов
+        self._controls_row = QHBoxLayout()
+        self._controls_row.setContentsMargins(0, 0, 0, 0)
+        self._controls_row.setSpacing(6)
+        self._controls_row.addWidget(ch_frame, 0, Qt.AlignmentFlag.AlignTop)
+        self._controls_row.addStretch()
+        root.addLayout(self._controls_row)
 
 
         QShortcut(QKeySequence(Qt.Key.Key_Left),  self, self._pan_left)
         QShortcut(QKeySequence(Qt.Key.Key_Right), self, self._pan_right)
 
         # ── панель архива ────────────────────────────────────────────────────
+        # Диапазон и кнопка загрузки в одну строку, справа от каналов: готовых
+        # интервалов (5м/30м/1ч…) больше нет, границы задаются полями.
         self._arch_panel = QFrame()
+        self._arch_panel.setObjectName("chPanel")
         self._arch_panel.setStyleSheet(_panel_style(True))
-        arch_layout = QVBoxLayout(self._arch_panel)
-        arch_layout.setContentsMargins(4, 2, 4, 2)
-        arch_layout.setSpacing(2)
+        self._arch_panel.setSizePolicy(QSizePolicy.Policy.Maximum,
+                                       QSizePolicy.Policy.Maximum)
+        arch_layout = QHBoxLayout(self._arch_panel)
+        arch_layout.setContentsMargins(4, 3, 4, 3)
+        arch_layout.setSpacing(3)
 
-        # ряд пресетов
-        presets_row = QHBoxLayout()
-        presets_row.setSpacing(2)
-        presets = [
-            ("5м",  300),
-            ("30м", 1800),
-            ("1ч",  3600),
-            ("6ч",  21600),
-            ("24ч", 86400),
-            ("7д",  604800),
-        ]
-        self._preset_buttons: list = []
-        for label, secs in presets:
-            btn = QPushButton(label)
-            btn.setFixedHeight(18)
-            btn.clicked.connect(lambda _, s=secs, b=btn: self._select_preset(s, b))
-            presets_row.addWidget(btn)
-            self._preset_buttons.append(btn)
-        arch_layout.addLayout(presets_row)
+        _FLD_H = 22        # общая высота элементов строки
 
-        # сетка: С/По + кнопка Загрузить на 2 строки
-        from PyQt6.QtWidgets import QGridLayout
         now = QDateTime.currentDateTime()
-        grid = QGridLayout()
-        grid.setSpacing(2)
-
         self.date_from = QDateEdit(now.addSecs(-300).date())
         self.date_from.setDisplayFormat("dd.MM.yyyy")
         self.date_from.setCalendarPopup(True)
-        self.date_from.setFixedHeight(18)
         self.time_from = QTimeEdit(now.addSecs(-300).time())
         self.time_from.setDisplayFormat("HH:mm:ss")
-        self.time_from.setFixedHeight(18)
 
         self.date_to = QDateEdit(now.date())
         self.date_to.setDisplayFormat("dd.MM.yyyy")
         self.date_to.setCalendarPopup(True)
-        self.date_to.setFixedHeight(18)
         self.time_to = QTimeEdit(now.time())
         self.time_to.setDisplayFormat("HH:mm:ss")
-        self.time_to.setFixedHeight(18)
-
-        self.btn_load = QPushButton("Загрузить")
-        self.btn_load.clicked.connect(self._load_archive)
-
-        grid.addWidget(QLabel("С:"),      0, 0)
-        grid.addWidget(self.date_from,    0, 1)
-        grid.addWidget(self.time_from,    0, 2)
-        grid.addWidget(QLabel("По:"),     1, 0)
-        grid.addWidget(self.date_to,      1, 1)
-        grid.addWidget(self.time_to,      1, 2)
-        grid.addWidget(self.btn_load,     0, 3, 2, 1)  # span 2 строки
-
-        arch_layout.addLayout(grid)
 
         for field in (self.date_from, self.time_from, self.date_to, self.time_to):
-            field.dateTimeChanged.connect(
-                lambda _: [b.setStyleSheet(self._PRESET_OFF) for b in self._preset_buttons])
+            field.setFixedHeight(_FLD_H)
 
-        sp = self._arch_panel.sizePolicy()
-        sp.setRetainSizeWhenHidden(True)
-        self._arch_panel.setSizePolicy(sp)
+        self.btn_load = QPushButton("Загрузить")
+        self.btn_load.setFixedHeight(_FLD_H)
+        self.btn_load.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_load.clicked.connect(self._load_archive)
+
+        arch_layout.addWidget(_cap("С"))
+        arch_layout.addWidget(self.date_from)
+        arch_layout.addWidget(self.time_from)
+        arch_layout.addWidget(_cap("по"))
+        arch_layout.addWidget(self.date_to)
+        arch_layout.addWidget(self.time_to)
+        arch_layout.addWidget(_sep())
+        arch_layout.addWidget(self.btn_load)
+
+        # Справа от каналов, в той же строке; распорка в конце — последняя.
         self._arch_panel.setVisible(False)
-        controls_row.addWidget(self._arch_panel)
-        controls_row.addStretch()
+        self._controls_row.insertWidget(self._controls_row.count() - 1,
+                                        self._arch_panel, 0,
+                                        Qt.AlignmentFlag.AlignTop)
 
         # ── график ───────────────────────────────────────────────────────────
         self._time_axis  = _TimeAxisItem(orientation="bottom")
@@ -301,17 +356,6 @@ class TrendsWiget(QWidget):
         _auto_btn.show = lambda: None  # запретить pyqtgraph показывать кнопку
         self._legend = self.plot_widget.addLegend()
         root.addWidget(self.plot_widget, 1)
-
-        # ── накладная метка: число видимых точек ─────────────────────────────
-        self._pts_label = QLabel("", self.plot_widget.viewport())
-        self._pts_label.setStyleSheet(
-            "background: rgba(0,0,0,160); color: #aaaaaa;"
-            " font-size: 11px; padding: 2px 6px; border-radius: 3px;"
-        )
-        self._pts_label.move(8, 8)
-        self._pts_label.raise_()
-        self._pts_label.show()
-        self._pts_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         # перевод контекстного меню
         self._csv_export_action, self._xlsx_export_action, self._export_menu_action = \
@@ -353,6 +397,14 @@ class TrendsWiget(QWidget):
         self.plot_widget.scene().sigMouseClicked.connect(self._on_mouse_clicked)
         self.plot_widget.getViewBox().sigRangeChangedManually.connect(self._on_manual_pan)
 
+        # Архив перечитывается под видимое окно. Задержка — чтобы при
+        # перетаскивании ушёл один запрос, а не по одному на каждый кадр.
+        self._arch_timer = QTimer(self)
+        self._arch_timer.setSingleShot(True)
+        self._arch_timer.setInterval(300)
+        self._arch_timer.timeout.connect(self._reload_visible_archive)
+        self.plot_widget.getViewBox().sigXRangeChanged.connect(self._on_arch_x_changed)
+
         # Ctrl+колесо → масштаб оси X; обычное колесо → масштаб оси Y
         _vb = self.plot_widget.getViewBox()
         _vb_wheel = type(_vb).wheelEvent
@@ -392,7 +444,7 @@ class TrendsWiget(QWidget):
         """Создать запись канала и его кривую; строку UI не создаёт."""
         curve = self.plot_widget.plot(
             [], [],
-            pen=pg.mkPen(color=QColor(color), width=1),
+            pen=pg.mkPen(color=QColor(color), width=_CH_WIDTH),
         )
         curve.setDownsampling(auto=True, method='peak')
         curve.setClipToView(True)   # для hold-каналов сбрасывается ниже в _setup_ui
@@ -406,7 +458,7 @@ class TrendsWiget(QWidget):
             'write':        0,
             'full':         False,
             'color':        color,
-            'width':        1,
+            'width':        _CH_WIDTH,
             'alpha':        255,
             'points':       False,
             'visible':      True,   # отображается ли канал на графике
@@ -416,83 +468,128 @@ class TrendsWiget(QWidget):
             'stream':       None,   # имя потока в bus.stream_points (фильтр в слоте)
             'slot':         None,   # сохранённая ссылка на lambda-слот для отключения
             'row':          None,
-            'color_btn':    None,
-            'toggle_btn':   None,
         }
 
     def _make_channel_row(self, ch_id: int) -> QWidget:
         """Собрать горизонтальную строку управления каналом."""
         ch = self._channels[ch_id]
-        row = QWidget()
-        row.setFixedHeight(22)
+        row = QFrame()
+        row.setObjectName("chRow")
+        row.setFixedHeight(24)
+        ch['row'] = row              # нужен уже сейчас: по нему красит _style_ch_row
         hl = QHBoxLayout(row)
-        hl.setContentsMargins(2, 0, 2, 0)
-        hl.setSpacing(4)
+        hl.setContentsMargins(6, 0, 6, 0)
+        hl.setSpacing(6)
 
-        # ── вкл/выкл отображения ─────────────────────────────────────────────
-        toggle_btn = QPushButton("●")
-        toggle_btn.setCheckable(True)
-        toggle_btn.setChecked(True)
-        toggle_btn.setFixedSize(18, 18)
-        toggle_btn.setToolTip("Показать / скрыть канал на графике")
-        toggle_btn.setStyleSheet(_toggle_style(True))
-        toggle_btn.toggled.connect(
-            lambda checked, cid=ch_id: self._toggle_ch_visible(cid, checked))
-        ch['toggle_btn'] = toggle_btn
-
-        # ── цвет линии ───────────────────────────────────────────────────────
-        color_btn = QPushButton()
-        color_btn.setFixedSize(16, 16)
-        color_btn.setToolTip("Цвет линии")
-        color_btn.setStyleSheet(
-            f"background-color:{ch['color']}; border-radius:3px; border:1px solid #7f8c8d;")
-        color_btn.clicked.connect(lambda _=False, cid=ch_id: self._pick_channel_color(cid))
-        ch['color_btn'] = color_btn
+        # Отдельных кнопок «глаз» и «цвет» в строке нет — и то, и другое лежит в
+        # меню по правой кнопке. Обычный щелчок ничего не делает намеренно:
+        # случайно попасть по строке и потерять канал с графика не должно.
+        # Что канал скрыт, видно по самой строке: она уходит в серое целиком.
+        row.setToolTip("Правая кнопка — цвет линии и показ канала")
+        row.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        row.customContextMenuRequested.connect(
+            lambda pos, cid=ch_id: self._row_menu(cid, pos))
 
         # ── лейбл ────────────────────────────────────────────────────────────
-        lbl = QLabel(ch['name'] + ":")
-        lbl.setFixedWidth(180)
-
-        # ── толщина ──────────────────────────────────────────────────────────
-        width_spin = QSpinBox()
-        width_spin.setRange(1, 10)
-        width_spin.setValue(ch['width'])
-        width_spin.setFixedWidth(46)
-        width_spin.setToolTip("Толщина линии")
-        width_spin.valueChanged.connect(
-            lambda v, cid=ch_id: self._set_ch_width(cid, v))
+        # имя цветом своей кривой: строку находишь по цвету, а не вчитываясь
+        lbl = QLabel(ch['name'])
+        lbl.setObjectName("chName")
+        # ширина под самое длинное имя, а не «на глаз»: колонка ровная у всех строк
+        lbl.setFixedWidth(max(lbl.fontMetrics().horizontalAdvance(n)
+                              for n in _CH_NAMES) + 8)
+        ch['name_lbl'] = lbl
 
         # ── прозрачность ─────────────────────────────────────────────────────
         alpha_slider = QSlider(Qt.Orientation.Horizontal)
         alpha_slider.setRange(0, 100)
         alpha_slider.setValue(100)
-        alpha_slider.setFixedWidth(80)
+        # минимум небольшой: на узких экранах карточки должны ужаться, чтобы
+        # панель архива справа осталась на той же строке
+        alpha_slider.setMinimumWidth(45)
         alpha_slider.setToolTip("Прозрачность линии")
         alpha_slider.valueChanged.connect(
             lambda v, cid=ch_id: self._set_ch_alpha(cid, v))
 
         # ── точки ────────────────────────────────────────────────────────────
-        points_cb = QCheckBox("Точки")
-        points_cb.setChecked(ch['points'])
-        points_cb.toggled.connect(
+        # значком, а не галочкой: сама иконка показывает, что получится —
+        # ломаная с маркерами или без них
+        points_btn = QPushButton()
+        points_btn.setObjectName("chPoints")
+        points_btn.setCheckable(True)
+        points_btn.setChecked(ch['points'])
+        points_btn.setFixedSize(24, 20)
+        points_btn.setIconSize(QSize(17, 17))
+        points_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        points_btn.toggled.connect(
             lambda v, cid=ch_id: self._set_ch_points(cid, v))
+        ch['points_btn'] = points_btn
 
-        hl.addWidget(toggle_btn)
-        hl.addWidget(color_btn)
+        # Слабину забирает слайдер (stretch=1), распорки в конце нет — иначе
+        # справа оставался пустой хвост.
+        # Подписи «Прозрачность» нет: в ряд встают три карточки, и вместе с
+        # панелью архива они переставали помещаться по ширине. Слайдер в строке
+        # один, его назначение объясняет подсказка.
         hl.addWidget(lbl)
         hl.addWidget(_sep())
-        hl.addWidget(QLabel("Толщина:"))
-        hl.addWidget(width_spin)
+        hl.addWidget(alpha_slider, 1)
         hl.addWidget(_sep())
-        hl.addWidget(QLabel("Прозрачность:"))
-        hl.addWidget(alpha_slider)
-        hl.addWidget(_sep())
-        hl.addWidget(points_cb)
-        hl.addStretch()
+        hl.addWidget(points_btn)
 
+        self._style_ch_row(ch_id)
         return row
 
+    def _style_ch_row(self, ch_id: int):
+        """Перекрасить строку канала в его цвет (и приглушить, если канал скрыт).
+
+        Вызывается при создании строки, смене цвета и включении/выключении
+        канала — цвет строки всегда совпадает с цветом кривой на графике.
+        """
+        ch = self._channels.get(ch_id)
+        if ch is None or ch.get('row') is None:
+            return
+        on    = ch['visible']
+        color = ch['color'] if on else "#7f8c8d"
+        ch['row'].setStyleSheet(f"""
+            QFrame#chRow {{
+                background: {_rgba(color, 26 if on else 14)};
+                border: 1px solid {_rgba(color, 80 if on else 45)};
+                border-left: 3px solid {color};
+                border-radius: 5px;
+            }}
+            QFrame#chRow QLabel#chName {{
+                color: {color}; font-weight: 600;
+                background: transparent;
+            }}
+            QFrame#chRow QPushButton#chPoints {{
+                background: transparent; border: none; border-radius: 4px;
+            }}
+            QFrame#chRow QPushButton#chPoints:hover {{ background: {_rgba(color, 60)}; }}
+            QFrame#chRow QPushButton#chPoints:checked {{ background: {_rgba(color, 90)}; }}
+            QFrame#chRow QSlider::handle:horizontal {{ background: {color}; }}
+            QFrame#chRow QSlider::handle:horizontal:hover {{
+                background: {QColor(color).lighter(125).name()};
+            }}
+        """)
+        pts = ch.get('points_btn')
+        if pts is not None:
+            pts.setIcon(QIcon(make_icon(
+                "points" if ch['points'] else "points_off", color, 17)))
+            pts.setToolTip("Скрыть точки на линии" if ch['points']
+                           else "Показать точки на линии")
+
     # ── per-channel controls ──────────────────────────────────────────────────
+
+    def _row_menu(self, ch_id: int, pos):
+        """Меню строки канала по правой кнопке: цвет линии и показ на графике."""
+        ch = self._channels.get(ch_id)
+        if ch is None:
+            return
+        menu = QMenu(ch['row'])
+        menu.addAction("Цвет линии…", lambda cid=ch_id: self._pick_channel_color(cid))
+        menu.addAction("Скрыть канал" if ch['visible'] else "Показать канал",
+                       lambda cid=ch_id, v=not ch['visible']:
+                           self._toggle_ch_visible(cid, v))
+        menu.exec(ch['row'].mapToGlobal(pos))
 
     def _toggle_ch_visible(self, ch_id: int, visible: bool):
         """Показать или скрыть канал на графике, подключив/отключив сигнал."""
@@ -507,8 +604,7 @@ class TrendsWiget(QWidget):
         else:
             self._disconnect_ch(ch)
             self._legend.removeItem(ch['curve'])
-        if ch['toggle_btn'] is not None:
-            ch['toggle_btn'].setStyleSheet(_toggle_style(visible))
+        self._style_ch_row(ch_id)
 
     def _pick_channel_color(self, ch_id: int):
         """Открыть диалог выбора цвета для канала."""
@@ -529,6 +625,7 @@ class TrendsWiget(QWidget):
         ch['curve'].opts['antialias'] = True
         ch['curve'].setPen(pg.mkPen(color=_ch_qcolor(ch), width=width))
         vb.setRange(xRange=saved[0], yRange=saved[1], padding=0)
+        self._restyle_archive_line(ch_id)
 
     def _set_ch_alpha(self, ch_id: int, value: int):
         ch = self._channels.get(ch_id)
@@ -539,6 +636,7 @@ class TrendsWiget(QWidget):
         saved = vb.viewRange()
         ch['curve'].setPen(pg.mkPen(color=_ch_qcolor(ch), width=ch['width']))
         vb.setRange(xRange=saved[0], yRange=saved[1], padding=0)
+        self._restyle_archive_line(ch_id)
 
     def _set_ch_points(self, ch_id: int, checked: bool):
         ch = self._channels.get(ch_id)
@@ -551,38 +649,26 @@ class TrendsWiget(QWidget):
         ch['curve'].setSymbolSize(5 if checked else 1)
         ch['curve'].setSymbolBrush(pg.mkBrush(ch['color']) if checked else None)
         vb.setRange(xRange=saved[0], yRange=saved[1], padding=0)
-
-    def _update_pts_label(self):
-        (x0, x1), _ = self.plot_widget.getViewBox().viewRange()
-        lines = []
-        if self._mode == "live":
-            for ch in self._channels.values():
-                if not ch['visible']:
-                    continue
-                xs, _ = ch['curve'].getData()
-                if xs is None or len(xs) == 0:
-                    continue
-                n = int(np.searchsorted(xs, x1, 'right') - np.searchsorted(xs, x0, 'left'))
-                lines.append(f"{ch['name'][:22]}: {n}")
-        else:
-            for ch_id, line in self._archive_lines.items():
-                xs, _ = line.getData()
-                if xs is None or len(xs) == 0:
-                    continue
-                n = int(np.searchsorted(xs, x1, 'right') - np.searchsorted(xs, x0, 'left'))
-                lines.append(f"{self._channels[ch_id]['name'][:22]}: {n}")
-        self._pts_label.setText("\n".join(lines) if lines else "")
-        self._pts_label.adjustSize()
+        self._restyle_archive_line(ch_id)
+        self._style_ch_row(ch_id)   # значок кнопки показывает текущее состояние
 
     # ── режимы ────────────────────────────────────────────────────────────────
 
+    def _sync_mode_btns(self):
+        """Отметить сегмент текущего режима; значок — в цвет надписи сегмента."""
+        for mode, (btn, kind) in self._mode_btns.items():
+            on = (mode == self._mode)
+            btn.setChecked(on)
+            btn.setIcon(QIcon(make_icon(kind, "#ffffff" if on else _MODE_COLORS[mode], 14)))
+
     def _set_mode(self, mode: str):
         if mode == self._mode:
+            self._sync_mode_btns()   # повторный клик по своему же сегменту
             return
         self._mode = mode
         vb = self.plot_widget.getViewBox()
         self._export_menu_action.setVisible(mode == "archive")
-        self.cb_mode.setCurrentIndex(0 if mode == "live" else 1)
+        self._sync_mode_btns()
         if mode == "live":
             self._arch_panel.setVisible(False)
             self.plot_widget.setLabel("bottom", "Время")
@@ -607,9 +693,7 @@ class TrendsWiget(QWidget):
             for ch in self._channels.values():
                 self._disconnect_ch(ch)
                 self._legend.removeItem(ch['curve'])
-            for w in self._archive_workers:
-                w.part_ready.disconnect()
-            self._archive_workers.clear()
+            self._stop_archive_workers()
             self._render_timer.stop()
             self._clear_archive()
             for ch in self._channels.values():
@@ -778,7 +862,6 @@ class TrendsWiget(QWidget):
             if n > 0:
                 all_y.append(ch['buf_v'][:n])
         if not all_y:
-            self._update_pts_label()
             return
         y = np.concatenate(all_y)
         ymin, ymax = float(y.min()), float(y.max())
@@ -789,7 +872,6 @@ class TrendsWiget(QWidget):
         if abs(lo - prev_lo) / prev_span > 0.05 or abs(hi - prev_hi) / prev_span > 0.05:
             self.plot_widget.getViewBox().setYRange(lo, hi, padding=0)
             self._y_range = (lo, hi)
-        self._update_pts_label()
 
     def _on_manual_pan(self):
         """Пользователь потащил график мышью — останавливаем авто-скролл."""
@@ -821,14 +903,25 @@ class TrendsWiget(QWidget):
 
     # ── архив ─────────────────────────────────────────────────────────────────
 
-    _PRESET_ON  = "background-color: #1a8fe3; color: white; font-weight: bold;"
-    _PRESET_OFF = ""
-
     # ch_id → (measurement, field) для запросов архива
     _ARCHIVE_SOURCES = {
         1: ("nowSetpoint",  "value"),
         2: ("tenza",        "value"),
         3: ("displacement", "value"),
+    }
+
+    # Прореживание архива на стороне Influx: сколько точек максимум тянуть и
+    # рисовать на канал. Экран всё равно не покажет больше — на 1900 точек
+    # приходится примерно по точке на пиксель ширины графика, а из базы при
+    # этом едут килобайты вместо десятков мегабайт.
+    _ARCHIVE_MAX_PTS = 1900
+
+    # Каким каналам прореживание применять и какой функцией сворачивать окно.
+    # Уставка (канал 1) сюда не входит: это ступенчатый сигнал с редкими
+    # изменениями, усреднение размыло бы ступени, а точек там и так мало.
+    _ARCHIVE_AGG = {
+        2: "mean",   # нагрузка
+        3: "mean",   # перемещение
     }
 
     def _set_load_progress(self, fraction):
@@ -853,20 +946,6 @@ class TrendsWiget(QWidget):
             }}
         """)
 
-    def _select_preset(self, secs: int, active_btn: QPushButton):
-        now = QDateTime.currentDateTime()
-        frm = now.addSecs(-secs)
-        for field in (self.date_from, self.time_from, self.date_to, self.time_to):
-            field.blockSignals(True)
-        self.date_from.setDate(frm.date())
-        self.time_from.setTime(frm.time())
-        self.date_to.setDate(now.date())
-        self.time_to.setTime(now.time())
-        for field in (self.date_from, self.time_from, self.date_to, self.time_to):
-            field.blockSignals(False)
-        for b in self._preset_buttons:
-            b.setStyleSheet(self._PRESET_ON if b is active_btn else self._PRESET_OFF)
-
     def _load_archive(self):
         qdt_from = QDateTime(self.date_from.date(), self.time_from.time()).toUTC()
         qdt_to   = QDateTime(self.date_to.date(),   self.time_to.time()).toUTC()
@@ -875,20 +954,23 @@ class TrendsWiget(QWidget):
         self._ts_offset = qdt_from.toMSecsSinceEpoch() / 1000.0
         self._time_axis.ts_offset = self._ts_offset
 
-        for w in self._archive_workers:
-            try:
-                w.part_ready.disconnect()
-            except RuntimeError:
-                pass
-            try:
-                w.finished.disconnect(self._on_archive_worker_done)
-            except RuntimeError:
-                pass
-        self._archive_workers.clear()
+        self._clear_archive()          # сбрасывает и _arch_full — выставляем после
+        # весь заказанный диапазон: за его пределы перезапрос при зуме не выйдет
+        self._arch_full = (qdt_from.toMSecsSinceEpoch() / 1000.0,
+                           qdt_to.toMSecsSinceEpoch() / 1000.0)
+        self.plot_widget.getViewBox().enableAutoRange()   # первый показ — по данным
+        self._query_archive(*self._arch_full)
 
-        for b in self._preset_buttons:
-            b.setStyleSheet(self._PRESET_OFF)
-        self._clear_archive()
+    def _query_archive(self, t_from: float, t_to: float):
+        """Запросить архив за [t_from, t_to] (секунды Unix) и обновить кривые.
+
+        Каждый канал прореживается в самой базе до _ARCHIVE_MAX_PTS точек, а не
+        тянется целиком: за сутки в базе миллионы отсчётов, на экране их всё
+        равно не различить, зато передача и отрисовка занимали десятки секунд.
+        """
+        if t_to <= t_from:
+            return
+        self._stop_archive_workers()
         self._archive_parts.clear()
         self._workers_done = 0
 
@@ -900,26 +982,35 @@ class TrendsWiget(QWidget):
         }
         if not visible_sources:
             return
+        self._arch_window = (t_from, t_to)
         self._total_archive_workers = len(visible_sources) * N_ARCHIVE_WORKERS
         self._set_load_progress(0)
 
-        total_ms = qdt_from.msecsTo(qdt_to)
-        step_ms  = total_ms // N_ARCHIVE_WORKERS
+        # Окно свёртки — на весь диапазон, а не на кусок воркера: части идут
+        # подряд с одинаковым шагом, поэтому в сумме выходит ровно тот предел,
+        # что задан на канал.
+        span   = t_to - t_from
+        every  = max(1_000_000, int(span * 1e9 / self._ARCHIVE_MAX_PTS))
+        step   = span / N_ARCHIVE_WORKERS
 
         for ch_id, (measurement, field) in visible_sources.items():
             self._archive_parts[ch_id] = {}
+            agg = self._ARCHIVE_AGG.get(ch_id)
             for i in range(N_ARCHIVE_WORKERS):
-                p_from = qdt_from.addMSecs(i * step_ms)
-                p_to   = qdt_from.addMSecs((i + 1) * step_ms) if i < N_ARCHIVE_WORKERS - 1 else qdt_to
+                p_from = t_from + i * step
+                p_to   = t_from + (i + 1) * step if i < N_ARCHIVE_WORKERS - 1 else t_to
                 # keep — только нужные колонки (меньше байт по HTTP и парсинга);
                 # group()/sort() не нужны: один воркер тянет непрерывный кусок
                 # одной серии, Influx отдаёт его по времени по возрастанию.
-                query  = f'''
+                query = f'''
 from(bucket: "{INFLUX_BUCKET}")
-  |> range(start: {p_from.toString("yyyy-MM-ddTHH:mm:ssZ")}, stop: {p_to.toString("yyyy-MM-ddTHH:mm:ssZ")})
+  |> range(start: {_flux_time(p_from)}, stop: {_flux_time(p_to)})
   |> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}")
   |> keep(columns: ["_time", "_value"])
 '''
+                if agg:
+                    query += (f'  |> aggregateWindow(every: {every}ns, '
+                              f'fn: {agg}, createEmpty: false)\n')
                 worker = _ArchiveWorker(i, query, parent=self)
                 worker.part_ready.connect(
                     lambda idx, t, v, c=ch_id: self._on_archive_part(c, idx, t, v)
@@ -929,6 +1020,55 @@ from(bucket: "{INFLUX_BUCKET}")
 
         for w in self._archive_workers:
             w.start()
+
+    def _stop_archive_workers(self):
+        """Отцепить сигналы прежних воркеров — их ответы уже не нужны."""
+        for w in self._archive_workers:
+            try:
+                w.part_ready.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                w.finished.disconnect(self._on_archive_worker_done)
+            except (RuntimeError, TypeError):
+                pass
+        self._archive_workers.clear()
+
+    # ── перезапрос при смене масштаба ─────────────────────────────────────────
+
+    def _on_arch_x_changed(self, _vb=None, _rng=None):
+        """Масштаб или сдвиг по X изменились — перечитать архив под новое окно.
+
+        Сразу не дёргаем: при перетаскивании сигнал приходит десятки раз в
+        секунду, запрос уходит только когда пользователь остановился.
+        """
+        if self._mode != "archive" or self._arch_full is None:
+            return
+        self._arch_timer.start()
+
+    def _visible_archive_range(self):
+        """Видимое окно в секундах Unix, обрезанное по загруженному диапазону."""
+        (x0, x1), _ = self.plot_widget.getViewBox().viewRange()
+        t0 = max(self._arch_full[0], x0 + self._ts_offset)
+        t1 = min(self._arch_full[1], x1 + self._ts_offset)
+        return t0, t1
+
+    def _reload_visible_archive(self):
+        """Перечитать архив под текущее видимое окно, если оно заметно съехало."""
+        if self._mode != "archive" or self._arch_full is None:
+            return
+        t0, t1 = self._visible_archive_range()
+        if t1 - t0 <= 0:
+            return
+        if self._arch_window is not None:
+            w0, w1 = self._arch_window
+            span = max(w1 - w0, 1e-9)
+            # окно почти то же самое — перезапрашивать нечего
+            if abs(t0 - w0) / span < 0.02 and abs(t1 - w1) / span < 0.02:
+                return
+        # вид уже выставлен пользователем: новые данные не должны его двигать
+        self.plot_widget.getViewBox().disableAutoRange()
+        self._query_archive(t0, t1)
 
     def _on_archive_part(self, ch_id: int, idx: int, times, values):
         """Часть канала пришла (times/values — numpy-массивы от воркера)."""
@@ -973,7 +1113,7 @@ from(bucket: "{INFLUX_BUCKET}")
             x, y = _step_xy(x, y)
         x_norm = x - self._ts_offset   # нормализация для OpenGL
         color    = ch.get('color',  "#e67e22")
-        width    = ch.get('width',  1)
+        width    = ch.get('width',  _CH_WIDTH)
         show_pts = ch.get('points', False)
         name = ch.get('name', f"канал {ch_id}")
         pen  = pg.mkPen(color=color, width=width)
@@ -990,6 +1130,26 @@ from(bucket: "{INFLUX_BUCKET}")
             line.setClipToView(True)
             self._archive_lines[ch_id] = line
             self._legend.addItem(line, name)
+        # оформление могли поменять, пока архив грузился
+        self._restyle_archive_line(ch_id)
+
+    def _restyle_archive_line(self, ch_id: int):
+        """Применить настройки канала к его архивной кривой.
+
+        Цвет, толщина, прозрачность и точки правят live-кривую, а архивная —
+        отдельный объект графика. Без этого переключатели панели действовали
+        только на живой режим, а загруженный архив оставался таким, каким был
+        в момент загрузки.
+        """
+        line = self._archive_lines.get(ch_id)
+        ch   = self._channels.get(ch_id)
+        if line is None or ch is None:
+            return
+        line.setPen(pg.mkPen(color=_ch_qcolor(ch), width=ch['width']))
+        on = ch['points']
+        line.setSymbol('o' if on else None)
+        line.setSymbolSize(5 if on else 1)
+        line.setSymbolBrush(pg.mkBrush(_ch_qcolor(ch)) if on else None)
 
     # ── перекрестие и подсказка ───────────────────────────────────────────────
 
@@ -1140,6 +1300,7 @@ from(bucket: "{INFLUX_BUCKET}")
             self.plot_widget.removeItem(line)
         self._archive_lines.clear()
         self._archive_parts.clear()
+        self._arch_full = self._arch_window = None
 
     # ── публичный API ─────────────────────────────────────────────────────────
 
@@ -1176,9 +1337,8 @@ from(bucket: "{INFLUX_BUCKET}")
             return
         ch['color'] = color
         ch['curve'].setPen(pg.mkPen(color=_ch_qcolor(ch), width=ch['width']))
-        if ch['color_btn'] is not None:
-            ch['color_btn'].setStyleSheet(
-                f"background-color:{color}; border-radius:3px; border:1px solid #7f8c8d;")
+        self._restyle_archive_line(ch_id)
+        self._style_ch_row(ch_id)   # строка канала красится вместе с кривой
 
     def set_labels(self, x_label="X", y_label="Y"):
         self.plot_widget.setLabel("bottom", x_label)
@@ -1382,6 +1542,12 @@ from(bucket: "{INFLUX_BUCKET}")
 
 # ── вспомогательные функции модуля ───────────────────────────────────────────
 
+def _flux_time(ts: float) -> str:
+    """Секунды Unix → метка времени RFC3339 в UTC для запроса Flux."""
+    return (_dt.datetime.fromtimestamp(ts, _dt.timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+
+
 def _step_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Преобразовать массивы точек в ступенчатую функцию (горизонталь + вертикальный прыжок).
 
@@ -1398,10 +1564,28 @@ def _step_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def _sep() -> QFrame:
     """Вертикальный разделитель для строки канала."""
+    # заливкой, а не QFrame.VLine: рамки в строке уже перекрыты её стилем
     sep = QFrame()
-    sep.setFrameShape(QFrame.Shape.VLine)
-    sep.setStyleSheet("color: #4a6278;")
+    sep.setFixedWidth(1)
+    sep.setStyleSheet(f"background: {_rgba('#ffffff', 34)}; border: none;")
     return sep
+
+
+def _cap(text: str) -> QLabel:
+    """Подпись поля в строке канала: мелкая и приглушённая, чтобы не спорить с именем."""
+    lbl = QLabel(text)
+    lbl.setStyleSheet("color: #8a929c; background: transparent; font-size: 11px;")
+    return lbl
+
+
+def _rgba(hex_color: str, alpha: int) -> str:
+    """Цвет, разведённый до полупрозрачного (alpha 0…255).
+
+    Полупрозрачность вместо готового оттенка: подложка подмешивается к тому фону,
+    что под ней, и одна и та же строка читается на светлой и тёмной теме.
+    """
+    c = QColor(hex_color)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha})"
 
 
 def _ch_qcolor(ch: dict) -> QColor:
@@ -1409,18 +1593,3 @@ def _ch_qcolor(ch: dict) -> QColor:
     c = QColor(ch['color'])
     c.setAlpha(ch['alpha'])
     return c
-
-
-def _toggle_style(visible: bool) -> str:
-    """Стиль кнопки вкл/выкл канала."""
-    if visible:
-        return (
-            "QPushButton { color:#2ecc71; background:#2c3e50; "
-            "border:1px solid #27ae60; border-radius:3px; font-size:13px; }"
-            "QPushButton:hover { background:#27ae60; }"
-        )
-    return (
-        "QPushButton { color:#7f8c8d; background:#2c3e50; "
-        "border:1px solid #4a6278; border-radius:3px; font-size:13px; }"
-        "QPushButton:hover { background:#3d5166; }"
-    )

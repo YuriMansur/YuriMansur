@@ -1,16 +1,29 @@
 from PyQt6.QtWidgets import QPushButton
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QColor, QIcon
+
+from gui.icons import make_icon
 
 class NavigationButton(QPushButton):
-    def __init__(self, text, color):
+    ICON_PX = 18
+
+    def __init__(self, text, color, icon_kind: str = None):
         super().__init__(text)
         self.color = color
+        self._icon_kind = icon_kind
         self._text_color = "#ecf0f1"
         self._underline_color = "#ecf0f1"
         self.setFixedHeight(40)
+        self.setIconSize(QSize(self.ICON_PX, self.ICON_PX))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_style(False)
+
+    def _repaint_icon(self, active: bool):
+        """Значок в цвет надписи: на активной кнопке белый, иначе цвет темы."""
+        if not self._icon_kind:
+            return
+        color = "#ffffff" if active else self._text_color
+        self.setIcon(QIcon(make_icon(self._icon_kind, color, self.ICON_PX)))
     
     # Обновление стиля в зависимости от состояния активности
     def set_text_color(self, color: str):
@@ -19,6 +32,7 @@ class NavigationButton(QPushButton):
         self.update_style(self.isChecked())
 
     def update_style(self, active):
+        self._repaint_icon(active)
         if active:
             style = f"""
                 QPushButton {{

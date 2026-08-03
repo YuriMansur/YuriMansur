@@ -7,10 +7,10 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QComboBox,
-    QAbstractItemView, QSplitter,
+    QAbstractItemView, QSplitter, QApplication,
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPalette
 
 from export import export
 
@@ -193,27 +193,54 @@ class ExportViewer(QWidget):
             for col, val in enumerate(cols(r)):
                 tbl.setItem(i, col, QTableWidgetItem("" if val is None else str(val)))
 
-    def _apply_style(self):
-        self.setStyleSheet("""
-            QWidget { background: #1f242b; color: #dce3ea; font-size: 13px; }
-            QLabel#h1 { font-size: 16px; font-weight: bold; color: #1abc9c; }
-            QLabel#h2 { font-size: 15px; font-weight: bold; }
-            QLabel#muted { color: #9aa3ad; font-size: 12px; }
-            QFrame#card { background: #262c34; border: 1px solid #333b45; border-radius: 8px; }
-            QTableWidget { background: #15191e; border: 1px solid #333b45; border-radius: 6px;
-                           gridline-color: #2a313a; }
-            QHeaderView::section { background: #2b323b; color: #cfd8e0; border: none;
-                                   padding: 5px; font-weight: bold; }
-            QTableWidget::item:selected { background: #2c5168; color: white; }
-            QPushButton { background: #313944; border: 1px solid #3d4753; border-radius: 6px;
-                          padding: 5px 12px; }
-            QPushButton:hover { background: #3a4350; }
-            QComboBox { background: #15191e; border: 1px solid #3d4753; border-radius: 6px;
-                        padding: 3px 8px; }
-            QTabWidget::pane { border: 1px solid #333b45; border-radius: 6px; }
-            QTabBar::tab { background: #2b323b; padding: 6px 14px; border-top-left-radius: 6px;
-                           border-top-right-radius: 6px; }
-            QTabBar::tab:selected { background: #1abc9c; color: #10141a; font-weight: bold; }
+    def set_theme(self, dark: bool):
+        """Смена темы приложения — главное окно зовёт это у страниц стека."""
+        self._apply_style(dark)
+
+    def _apply_style(self, dark: bool = None):
+        """Оформление по палитре приложения.
+
+        Раньше цвета были вписаны прямо здесь и всегда тёмные — на светлой теме
+        страница оставалась чёрной. Теперь берём их из палитры: те же роли, что
+        и у остальных окон.
+        """
+        app = QApplication.instance()
+        pal = app.palette() if app is not None else self.palette()
+        R = QPalette.ColorRole
+        if dark is None:
+            dark = pal.color(R.Window).lightness() < 128
+        bg     = pal.color(R.Window).name()          # общий фон страницы
+        card   = pal.color(R.AlternateBase).name()   # карточка/шапка
+        field  = pal.color(R.Base).name()            # таблицы и поля ввода
+        text   = pal.color(R.WindowText).name()
+        border = pal.color(R.Mid).name()
+        btn    = pal.color(R.Button).name()
+        muted  = pal.color(R.PlaceholderText).name()
+        sel    = pal.color(R.Highlight).name()
+        sel_tx = pal.color(R.HighlightedText).name()
+        hover  = QColor(btn).lighter(115).name() if dark else QColor(btn).darker(108).name()
+        self.setStyleSheet(f"""
+            QWidget {{ background: {bg}; color: {text}; font-size: 13px; }}
+            QLabel#h1 {{ font-size: 16px; font-weight: bold; color: #1abc9c; }}
+            QLabel#h2 {{ font-size: 15px; font-weight: bold; }}
+            QLabel#muted {{ color: {muted}; font-size: 12px; }}
+            QFrame#card {{ background: {card}; border: 1px solid {border};
+                           border-radius: 8px; }}
+            QTableWidget {{ background: {field}; border: 1px solid {border};
+                            border-radius: 6px; gridline-color: {border}; }}
+            QHeaderView::section {{ background: {card}; color: {text}; border: none;
+                                    padding: 5px; font-weight: bold; }}
+            QTableWidget::item:selected {{ background: {sel}; color: {sel_tx}; }}
+            QPushButton {{ background: {btn}; border: 1px solid {border};
+                           border-radius: 6px; padding: 5px 12px; }}
+            QPushButton:hover {{ background: {hover}; }}
+            QComboBox {{ background: {field}; border: 1px solid {border};
+                         border-radius: 6px; padding: 3px 8px; }}
+            QTabWidget::pane {{ border: 1px solid {border}; border-radius: 6px; }}
+            QTabBar::tab {{ background: {card}; color: {text}; padding: 6px 14px;
+                            border-top-left-radius: 6px; border-top-right-radius: 6px; }}
+            QTabBar::tab:selected {{ background: #1abc9c; color: #10141a;
+                                     font-weight: bold; }}
         """)
 
 

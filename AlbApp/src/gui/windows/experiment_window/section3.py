@@ -538,8 +538,7 @@ class _CyclicWizard(QWidget):
         # метки плиток шага инициализации — пока этот шаг отрисован, иначе None;
         # подписки одни на визард, как у живых карточек
         self._link_icon = None
-        self._alarm_icon = None
-        self._status_btns: dict = {}   # ключ статуса → кнопка-иконка в шапке
+        self._status_icons: dict = {}  # ключ статуса → метка с иконкой в шапке
         self._nav_btns: list = []      # кнопки перехода текущего шага
         link.changed.connect(self._on_link)
         self._build_steps()
@@ -936,7 +935,6 @@ class _CyclicWizard(QWidget):
         self._jump_target = None
         self._build_steps()       # перечитать шаги из конфига (убрать вложенные под-шаги)
         self._rebuild_sidebar()
-        self._sync_status_icons() # шапка не пересобирается — снимаем отметки вручную
         self._goto(0)
 
     def _goto_protocol_interrupted(self):
@@ -1185,7 +1183,9 @@ class _CyclicWizard(QWidget):
         tgl = self._toggle_btn("🔁 Повторить" if done else "Выполнить шаг")
         self._style_one_toggle(tgl, done)
         tgl.clicked.connect(lambda _c=False: self._toggle_exec(step, store))
-        col.addWidget(tgl)
+        # выполнение под той же блокировкой, что и переход: на шагах нагружения
+        # ничего не делаем, пока стенд не готов
+        col.addWidget(self._register_nav(tgl))
 
         if done:
             nxt = self._btn("Следующий шаг", primary=True)
@@ -1414,48 +1414,58 @@ class _CyclicWizard(QWidget):
         return nav
 
     # ── статусы оборудования (в шапке, рядом с «Прервать») ──────────────────
+    # Ряд статусов: (ключ, вид иконки, подсказки «в норме» / «нет» / «неизвестно»).
+    # Значения — факт с ПЛК из массива initStatuses (энум st_names), воркер
+    # публикует их как st:<ИМЯ>. Кликать нечего: это состояние контроллера.
+    _STATUS_ROW = (
+        ("power",  "power",  ("Питание включено", "Питание выключено",
+                              "Питание: состояние неизвестно")),
+        ("link",   "link",   ()),                 # особый: состояние OPC-сессии
+        ("sensor", "sensor", ("Датчики исправны", "Датчики неисправны",
+                              "Датчики: состояние неизвестно")),
+        ("alarm",  "alarm",  ("Аварий нет", "Авария на стенде",
+                              "Авария: состояние неизвестно")),
+    )
+    _STATUS_TAGS = {
+        "power":  "st:DRIVE_POWER",
+        "sensor": "st:SENSORS_GOOD",
+        "alarm":  "st:GENERAL_FAULT",
+    }
+
     def _status_row(self) -> QWidget:
-        """Три иконки состояния: питание, связь с ПЛК, датчики.
+        """Ряд иконок состояния стенда: питание, связь, датчики, авария.
 
         Живут в шапке мастера, а не внутри шага: состояние относится к стенду,
         а не к конкретному шагу, и должно быть на виду всё испытание. Строятся
         один раз на визард — шаги их не пересоздают.
 
-        Питание и датчики подтверждает оператор (отдельных сигналов об их
-        исправности ПЛК не отдаёт), связь берётся из состояния OPC-сессии.
-        Состояние общее на всё испытание (ключ __status__ в значениях мастера):
-        переносится при смене темы и сбрасывается «Прервать». Подписей нет —
-        пояснение всплывает при наведении.
+        Все значения фактические: питание, датчики и авария приходят из массива
+        initStatuses с ПЛК, связь — из состояния OPC-сессии. Пока связи нет,
+        весь ряд жёлтый: подтвердить состояния нечем. Подписей нет — пояснение
+        всплывает при наведении.
         """
         w = QWidget()
         row = QHBoxLayout(w)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(2)
-        row.addWidget(self._check_icon(
-            "__power__", "power",
-            "Питание включено", "Питание: не подтверждено"))
-        self._link_icon = QLabel()
-        self._link_icon.setFixedSize(self._ICON_BOX, self._ICON_BOX)
-        self._link_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        row.addWidget(self._link_icon)
-        self._on_link(link.state)                # связь — сразу, не дожидаясь события
-        row.addWidget(self._check_icon(
-            "__sensors__", "sensor",
-            "Датчики исправны", "Датчики: не подтверждено"))
-        # авария — не кликается: состояние приходит тегом с ПЛК
-        self._alarm_icon = QLabel()
-        self._alarm_icon.setFixedSize(self._ICON_BOX, self._ICON_BOX)
-        self._alarm_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        row.addWidget(self._alarm_icon)
-        self._refresh_alarm_icon()
+        self._status_icons = {}
+        for key, _kind, _tips in self._STATUS_ROW:
+            lbl = QLabel()
+            lbl.setFixedSize(self._ICON_BOX, self._ICON_BOX)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            row.addWidget(lbl)
+            self._status_icons[key] = lbl
+            if key == "link":
+                self._link_icon = lbl
+        self._refresh_statuses()       # текущее состояние, не дожидаясь событий
         return w
 
-    # состояние связи → (текст подсказки, цвет из палитры визарда)
+    # состояние связи → текст подсказки (цвет один на весь ряд: см. _on_link)
     _LINK_VIEW = {
-        link.UP:           ("Связь с ПЛК: есть",              "green"),
-        link.DOWN:         ("Связь с ПЛК: нет",               "red"),
-        link.RECONNECTING: ("Связь с ПЛК: переподключение…",  "amber"),
-        link.UNKNOWN:      ("Связь с ПЛК: состояние неизвестно", "muted"),
+        link.UP:           "Связь с ПЛК: есть",
+        link.DOWN:         "Связь с ПЛК: нет",
+        link.RECONNECTING: "Связь с ПЛК: переподключение…",
+        link.UNKNOWN:      "Связь с ПЛК: состояние неизвестно",
     }
 
     _ICON_PX = 24        # размер иконки статуса
@@ -1464,14 +1474,13 @@ class _CyclicWizard(QWidget):
     # Группы, где стенд под нагрузкой: идти дальше можно только с подтверждённым
     # оборудованием. На подготовке и в завершении блокировки нет.
     _LOAD_GROUPS = ("НАГРУЖЕНИЕ", "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ")
-    _LOCK_TIP = ("Подтвердите питание и датчики в шапке "
-                 "и дождитесь связи с ПЛК")
+    _LOCK_TIP = ("Стенд не готов: нужны связь с ПЛК, питание, исправные датчики "
+                 "и отсутствие аварии")
 
     def _status_ready(self) -> bool:
-        """Оборудование готово: питание и датчики отмечены, связь с ПЛК есть."""
-        store = self._status_store()
-        return (bool(store.get("__power__")) and bool(store.get("__sensors__"))
-                and link.state == link.UP)
+        """Стенд готов: все статусы в норме (питание, датчики, авария, связь)."""
+        return all(self._status_ok(key) is True
+                   for key, _kind, _tips in self._STATUS_ROW)
 
     def _nav_blocked(self) -> bool:
         """Переход к следующему шагу запрещён (нагружение без готовности стенда)."""
@@ -1502,80 +1511,55 @@ class _CyclicWizard(QWidget):
             except RuntimeError:
                 pass          # кнопка прошлого шага уже удалена — пропускаем
 
-    def _status_store(self) -> dict:
-        """Значения статусов оборудования. Ищем каждый раз заново: _abort_test
-        заменяет _form_values целиком, и захваченная ссылка стала бы висячей."""
-        return self._form_values.setdefault("__status__", {})
+    def _offline(self) -> bool:
+        """Связи с ПЛК нет — состояниям стенда доверять нельзя."""
+        return link.state != link.UP
 
-    def _sync_status_icons(self):
-        """Привести иконки статусов к текущим значениям (после сброса мастера)."""
-        store = self._status_store()
-        for key, b in self._status_btns.items():
-            b.setChecked(bool(store.get(key)))
+    def _status_ok(self, key: str):
+        """Статус в норме / не в норме / неизвестен (None).
 
-    def _check_icon(self, key: str, kind: str,
-                    tip_on: str, tip_off: str) -> QPushButton:
-        """Статус-иконка ручной проверки: без рамки и подписи, только значок.
-
-        Клик переключает состояние (зелёная / приглушённая), пояснение всплывает
-        при наведении. Состояние живёт в значениях мастера, поэтому переносится
-        при смене темы и сбрасывается «Прервать».
+        Значения берём из кэша биндера, а не из своего: визард пересоздаётся при
+        смене темы и методики, и его кэш каждый раз пуст — тег приходит по
+        изменению и второй раз может не прийти вовсе.
         """
-        b = QPushButton()
-        b.setCheckable(True)
-        b.setChecked(bool(self._status_store().get(key)))
-        b.setFixedSize(self._ICON_BOX, self._ICON_BOX)
-        b.setIconSize(QSize(self._ICON_PX, self._ICON_PX))
-        b.setCursor(Qt.CursorShape.PointingHandCursor)
-        b.setStyleSheet(
-            "QPushButton { border: none; background: transparent; }"
-            f" QPushButton:hover {{ background: {_WZ['card_bg']}; border-radius: 6px; }}")
-        # доступна всегда: статус стенда не зависит от того, какой шаг открыт
+        if key == "link":
+            return not self._offline()
+        tag = self._STATUS_TAGS[key]
+        val = tags.last(tag)
+        if val is None:
+            return None
+        # авария инвертирована: «в норме» = аварии нет
+        return (not bool(val)) if key == "alarm" else bool(val)
 
-        def _sync(on: bool):
-            b.setIcon(QIcon(make_icon(
-                kind, _WZ['green'] if on else _WZ['muted'], self._ICON_PX)))
-            b.setToolTip(tip_on if on else tip_off)
+    def _refresh_statuses(self):
+        """Перерисовать ряд статусов по фактическим значениям с ПЛК.
 
-        _sync(b.isChecked())
-        b.toggled.connect(_sync)
-        b.toggled.connect(lambda on, k=key: self._status_store().__setitem__(k, on))
-        b.toggled.connect(lambda _on: self._refresh_nav_lock())
-        self._status_btns[key] = b
-        return b
-
-    # тег аварии с ПЛК и вид иконки по его значению
-    _ALARM_TAG = "general_fault"
-    _ALARM_VIEW = {
-        False: ("green", "Аварий нет"),
-        True:  ("muted", "Авария на стенде"),
-        None:  ("muted", "Авария: состояние неизвестно"),
-    }
-
-    def _refresh_alarm_icon(self):
-        """Иконка «отсутствие аварии»: зелёная, пока тега аварии нет.
-
-        Не кликается — значение приходит с ПЛК тегом general_fault: при аварии
-        иконка гаснет.
+        Пока связи нет — весь ряд жёлтый: значения устарели, подтвердить их
+        нечем. Со связью: зелёный — в норме, красный — нет, приглушённый —
+        значение с ПЛК ещё не приходило.
         """
-        if self._alarm_icon is None:
+        if not self._status_icons:
             return
-        # значение берём из кэша биндера, а не из своего _live_last: визард
-        # пересоздаётся при смене темы и методики, и его кэш каждый раз пуст —
-        # тег приходит по изменению и второй раз может не прийти вовсе
-        val = tags.last(self._ALARM_TAG)
-        color, tip = self._ALARM_VIEW[None if val is None else bool(val)]
-        self._alarm_icon.setPixmap(make_icon("alarm", _WZ[color], self._ICON_PX))
-        self._alarm_icon.setToolTip(tip)
+        offline = self._offline()
+        for key, kind, tips in self._STATUS_ROW:
+            lbl = self._status_icons.get(key)
+            if lbl is None:
+                continue
+            if key == "link":
+                tip   = self._LINK_VIEW.get(link.state, self._LINK_VIEW[link.UNKNOWN])
+                color = "amber" if offline else "green"
+            else:
+                ok    = self._status_ok(key)
+                tip   = tips[2] if ok is None else (tips[0] if ok else tips[1])
+                color = ("amber" if offline else
+                         "muted" if ok is None else
+                         "green" if ok else "red")
+            lbl.setPixmap(make_icon(kind, _WZ[color], self._ICON_PX))
+            lbl.setToolTip(tip)
 
     def _on_link(self, state: str, _server: str = ""):
-        """Перекрасить иконку связи и обновить её подсказку. Шаг инициализации
-        общий для всех методик, поэтому индикатор появляется в каждой из них."""
-        if self._link_icon is None:
-            return                      # отрисован не шаг инициализации — обновлять нечего
-        tip, color = self._LINK_VIEW.get(state, self._LINK_VIEW[link.UNKNOWN])
-        self._link_icon.setPixmap(make_icon("link", _WZ[color], self._ICON_PX))
-        self._link_icon.setToolTip(tip)
+        """Связь изменилась: перекрасить весь ряд и пересчитать блокировку."""
+        self._refresh_statuses()
         self._refresh_nav_lock()        # связь пропала → переход снова закрыт
 
     def _start_test(self):
@@ -1597,6 +1581,8 @@ class _CyclicWizard(QWidget):
 
     def _style_one_toggle(self, btn, active: bool):
         """Подсветить одиночную кнопку-тумблер (выбран / не выбран)."""
+        off = (f" QPushButton:disabled {{ background: {_WZ['card_bg']};"
+               f" color: {_WZ['muted']}; border: 1px solid {_WZ['border']}; }}")
         if active:
             btn.setChecked(True)
             # та же геометрия, что у неактивной (рамка 1px, паддинг, bold) —
@@ -1604,14 +1590,14 @@ class _CyclicWizard(QWidget):
             btn.setStyleSheet(
                 f"QPushButton {{ background: {_WZ['blue']}; color: white;"
                 f" border: 1px solid {_WZ['blue']}; border-radius: 6px;"
-                " padding: 6px 12px; font-weight: bold; }")
+                " padding: 6px 12px; font-weight: bold; }" + off)
         else:
             btn.setChecked(False)
             btn.setStyleSheet(
                 f"QPushButton {{ background: {_WZ['btn_bg']}; color: {_WZ['text']};"
                 f" border: 1px solid {_WZ['border']}; border-radius: 6px;"
                 " padding: 6px 12px; font-weight: bold; }"
-                f" QPushButton:hover {{ background: {_WZ['card_bg']}; }}")
+                f" QPushButton:hover {{ background: {_WZ['card_bg']}; }}" + off)
 
     def _style_toggle_pair(self, btn_yes, btn_no, used):
         """Подсветить «Да/Нет» по выбранному значению (общая для шагов 1 и 2)."""
@@ -1764,8 +1750,9 @@ class _CyclicWizard(QWidget):
 
     def _on_live_tag(self, name: str, val):
         self._live_last[name] = val    # скалярный тег (nowSetpoint и т.п.)
-        if name == self._ALARM_TAG:
-            self._refresh_alarm_icon()
+        if name in self._STATUS_TAGS.values():
+            self._refresh_statuses()   # статус стенда изменился
+            self._refresh_nav_lock()
 
     def _refresh_live_cards(self):
         for lc in self._live_cards:
@@ -1787,16 +1774,19 @@ class _CyclicWizard(QWidget):
         # в узкой колонке она ужимается, а не выталкивает контент за край
         b.setMinimumWidth(60)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
+        # у заблокированной кнопки свой вид — иначе она выглядит рабочей
+        off = (f" QPushButton:disabled {{ background: {_WZ['card_bg']};"
+               f" color: {_WZ['muted']}; border: 1px solid {_WZ['border']}; }}")
         if primary:
             b.setStyleSheet(
                 f"QPushButton {{ background: {_WZ['blue']}; color: white; border: none;"
                 " border-radius: 6px; padding: 6px 14px; font-weight: bold; }"
-                " QPushButton:hover { background: #3498db; }")
+                " QPushButton:hover { background: #3498db; }" + off)
         else:
             b.setStyleSheet(
                 f"QPushButton {{ background: {_WZ['btn_bg']}; color: {_WZ['text']};"
                 f" border: 1px solid {_WZ['border']}; border-radius: 6px; padding: 6px 12px; }}"
-                f" QPushButton:hover {{ background: {_WZ['card_bg']}; }}")
+                f" QPushButton:hover {{ background: {_WZ['card_bg']}; }}" + off)
         return b
 
 
@@ -1857,7 +1847,7 @@ class Section3Widget(QWidget):
         self._scroll.setWidget(self._wizard)
 
     def on_alarm(self):
-        """Слот сигнала аварии (alarm_test). Прерывание в режиме мастера
+        """Слот сигнала аварии (alarm_raised). Прерывание в режиме мастера
         выполняется пользователем через кнопку «Прервать» внутри визарда —
         здесь обработки нет, метод сохранён только для подключения сигнала."""
         return
