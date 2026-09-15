@@ -28,10 +28,19 @@ def _node_id(ns: int, path: str) -> str:
 
 
 def load_config() -> list[dict]:
-    """Прочитать servers.json и разрешить имена тегов в NodeId."""
+    """Прочитать servers.json и разрешить имена тегов в NodeId.
+
+    Сигналы у всех стендов одинаковые — servers.json один; адрес ПЛК и имя
+    сервера берутся из текущего стенда (patch/stands.json, см. stand.py).
+    Имя сервера уходит тегом `server` в Influx — по нему окна стендов
+    отделяют свои данные в общей базе.
+    """
+    import stand
+    cur = stand.current()
     raw = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
     servers: list[dict] = []
     for srv in raw.get("servers", []):
+        srv = dict(srv, name=cur["id"], endpoint=cur.get("endpoint") or srv["endpoint"])
         name = srv["name"]
         ns = srv.get("ns", 0)
         # Общий префикс пути узла (чтобы не повторять его в каждом теге).

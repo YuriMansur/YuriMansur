@@ -3,6 +3,7 @@ from PyQt6.QtCore import pyqtSignal
 
 from gui.windows.experiment_window.section1 import (
     _make_section1, set_manual_controls_enabled, set_test_running,
+    set_cameras_test_mode,
 )
 from gui.windows.experiment_window.section2 import Section2Widget
 from gui.windows.experiment_window.section3 import Section3Widget
@@ -30,6 +31,10 @@ class ExperimentWidget(QWidget):
         sec3.set_sample_info_provider(sec2.sample_info)   # «инфо об образце» → протокол
         sec3.set_params(sec2.cb_std.currentText(), sec2.cb_method.currentText())
 
+        # started приходит на каждом шаге мастера; камеры дёргаем только по
+        # фронту — иначе каждый переход перезапускал бы запись
+        self._test_running = False
+
         def _on_started(running: bool):
             for w in (sec2.cb_std, sec2.cb_load, sec2.cb_cond, sec2.cb_method):
                 w.setEnabled(not running)
@@ -37,6 +42,10 @@ class ExperimentWidget(QWidget):
             if getattr(self, "_sec1", None) is not None:
                 set_manual_controls_enabled(self._sec1, not running)
                 set_test_running(self._sec1, running)
+                if running != self._test_running:
+                    # старт → камеры открыть и писать; конец/прерывание → стоп и закрыть
+                    set_cameras_test_mode(self._sec1, running)
+            self._test_running = running
 
         sec3.started.connect(_on_started)
 

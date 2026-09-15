@@ -12,7 +12,9 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime
 
-_DB_PATH = Path(__file__).parent / "db" / "export.db"
+import stand
+
+_DB_PATH = stand.data_dir() / "export.db"   # журнал испытаний — свой у каждого стенда
 
 # статусы испытания
 STATUS_RUNNING   = "идёт"

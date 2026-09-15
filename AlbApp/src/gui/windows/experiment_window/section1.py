@@ -198,6 +198,7 @@ class _CameraWidget(QWidget):
         self._writer    = None
         self._ts_owner  = False  # эта камера ведёт общий сайдкар (см. _RecSession)
         self._recording = False
+        self._test_mode = False  # идёт испытание: камерой управляет мастер, не оператор
         _CameraWidget._instances.append(self)
         self._found: list = []   # последний результат скана: [(device_idx, name), ...]
         self._worker: _FrameWorker | None = None
@@ -303,9 +304,8 @@ class _CameraWidget(QWidget):
         key = "cam1" if self._cam_idx == 0 else "cam2"
         dev_id, fallback = None, ""
         try:
-            cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "..", "..", "..", "camera_settings.json")
-            with open(os.path.normpath(cfg_path), "r", encoding="utf-8") as f:
+            from gui.windows.settings_window.tab_wigets.ui_cameras_settings import _SETTINGS_FILE
+            with open(_SETTINGS_FILE, "r", encoding="utf-8") as f:
                 slot = json.load(f).get(key, {})
             dev_id   = slot.get("device_id")
             fallback = slot.get("device_name", "")
@@ -345,12 +345,15 @@ class _CameraWidget(QWidget):
         from PyQt6.QtGui import QCursor
         pos = self.mapFromGlobal(QCursor.pos())
         hovered = self.rect().contains(pos)
-        if hovered and not self._overlay.isVisible():
-            self._overlay.show()
-            self._overlay.raise_()
+        if hovered and not self._lbl_cam_name.isVisible():
+            # во время испытания кнопки открытия/записи скрыты — камерами
+            # управляет мастер (см. set_test_mode); имя камеры показываем всегда
+            if not self._test_mode:
+                self._overlay.show()
+                self._overlay.raise_()
             self._lbl_cam_name.show()
             self._lbl_cam_name.raise_()
-        elif not hovered and self._overlay.isVisible():
+        elif not hovered and self._lbl_cam_name.isVisible():
             self._overlay.hide()
             self._lbl_cam_name.hide()
 
@@ -553,6 +556,32 @@ class _CameraWidget(QWidget):
         self._lbl_status.setText("Камера закрыта")
         self._lbl_cam_name.setText(self._get_cam_name())
         self._lbl_cam_name.adjustSize()
+
+    def _ensure_open(self) -> bool:
+        """Открыть камеру, если ещё не открыта (в отличие от _open_camera —
+        не переключатель). Возвращает True, если камера открыта."""
+        if not (self._cap and self._cap.isOpened()):
+            self._open_camera()
+        return bool(self._cap and self._cap.isOpened())
+
+    def set_test_mode(self, running: bool) -> None:
+        """Режим испытания: по старту камера открывается и начинает запись,
+        кнопки управления прячутся; по завершению/прерыванию запись
+        останавливается и камера закрывается, кнопки возвращаются.
+
+        Каждая камера обрабатывается отдельно (_peer=True) — каскад на соседей
+        здесь не нужен, мастер сам обходит все камеры панели.
+        """
+        if running == self._test_mode:
+            return
+        self._test_mode = running
+        if running:
+            self._overlay.hide()
+            if self._ensure_open():
+                self._start_record(_peer=True)
+        else:
+            self._stop(_peer=True)
+            self._close_camera()
 
     def _on_fps(self, fps: int):
         self._lbl_cam_name.setText(
@@ -995,3 +1024,11 @@ def set_test_running(section1: QWidget, running: bool) -> None:
     card = getattr(inner, "_state_card", None)
     if card is not None:
         card.set_test_running(running)
+
+
+def set_cameras_test_mode(section1: QWidget, running: bool) -> None:
+    """Старт испытания → камеры открываются и пишут, кнопки скрыты;
+    завершение/прерывание → запись остановлена, камеры закрыты."""
+    inner = section1.widget() if isinstance(section1, QScrollArea) else section1
+    for cam in inner.findChildren(_CameraWidget):
+        cam.set_test_mode(running)

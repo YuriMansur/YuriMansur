@@ -17,8 +17,8 @@ from PyQt6.QtCore import Qt, QFileInfo, QFileSystemWatcher
 
 from gui.windows.messages_window.messages_viewer import table_style
 
-# protocols_window → windows → gui → src → AlbApp; documents лежит в AlbApp/documents
-_DOCS_DIR = Path(__file__).resolve().parents[4] / "documents"
+# документы стенда — stands/<id>/documents (та же папка, куда пишет protocols/generator)
+from protocols.generator import DOCUMENTS_DIR as _DOCS_DIR
 
 
 class ProtocolsWidget(QWidget):

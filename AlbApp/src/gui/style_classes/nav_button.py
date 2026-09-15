@@ -7,13 +7,19 @@ from gui.icons import make_icon
 class NavigationButton(QPushButton):
     ICON_PX = 18
 
-    def __init__(self, text, color, icon_kind: str = None):
+    def __init__(self, text, color, icon_kind: str = None, vertical: bool = False):
         super().__init__(text)
         self.color = color
         self._icon_kind = icon_kind
         self._text_color = "#ecf0f1"
         self._underline_color = "#ecf0f1"
+        # vertical — кнопка в боковой панели: текст слева, акцент полосой слева
+        # (а не подчёркиванием снизу), растягивается на ширину панели
+        self._vertical = vertical
         self.setFixedHeight(40)
+        if vertical:
+            from PyQt6.QtWidgets import QSizePolicy
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setIconSize(QSize(self.ICON_PX, self.ICON_PX))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_style(False)
@@ -33,6 +39,9 @@ class NavigationButton(QPushButton):
 
     def update_style(self, active):
         self._repaint_icon(active)
+        if self._vertical:
+            self._update_style_vertical(active)
+            return
         if active:
             style = f"""
                 QPushButton {{
@@ -64,6 +73,42 @@ class NavigationButton(QPushButton):
                 }}
             """
         # Применение стиля   
+        self.setStyleSheet(style)
+
+    def _update_style_vertical(self, active):
+        if active:
+            style = f"""
+                QPushButton {{
+                    background-color: {self.color};
+                    color: white;
+                    border: none;
+                    border-left: 4px solid {self._underline_color};
+                    border-radius: 4px;
+                    padding: 8px 12px;
+                    text-align: left;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: {self.darken_color(self.color)};
+                }}
+            """
+        else:
+            style = f"""
+                QPushButton {{
+                    background-color: transparent;
+                    color: {self._text_color};
+                    border: none;
+                    border-left: 4px solid transparent;
+                    border-radius: 4px;
+                    padding: 8px 12px;
+                    text-align: left;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba(128, 128, 128, 0.15);
+                    color: {self._text_color};
+                    border-left: 4px solid {self.color};
+                }}
+            """
         self.setStyleSheet(style)
 
     # Затемнение цвета для hover эффекта

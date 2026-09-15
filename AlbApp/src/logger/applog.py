@@ -12,7 +12,9 @@ import json
 from pathlib import Path
 from datetime import datetime, timedelta
 
-_DB_PATH = Path(__file__).parent / "db" / "logs.db"
+import stand
+
+_DB_PATH = stand.data_dir() / "logs.db"   # лог сообщений — свой у каждого стенда
 
 # уровни
 LEVEL_INFO  = "INFO"

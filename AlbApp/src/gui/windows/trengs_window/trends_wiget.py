@@ -19,6 +19,8 @@ from gui.icons import make_icon                 # значки панели: г�
 import pyqtgraph as pg                          # графическая библиотека (PlotWidget, InfiniteLine и др.)
 pg.setConfigOptions(antialias=True, useOpenGL=True)
 from event_bus import bus      # шина событий: получение точек от worker'а
+import stand                   # Influx общая на все стенды — архив фильтруем по тегу server
+_STAND_ID = stand.current()["id"]
 
 # ── локальные модули ──────────────────────────────────────────────────────────
 from ._archive_worker import (
@@ -1005,7 +1007,8 @@ class TrendsWiget(QWidget):
                 query = f'''
 from(bucket: "{INFLUX_BUCKET}")
   |> range(start: {_flux_time(p_from)}, stop: {_flux_time(p_to)})
-  |> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}")
+  |> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}"
+                       and r.server == "{_STAND_ID}")
   |> keep(columns: ["_time", "_value"])
 '''
                 if agg:
@@ -1441,7 +1444,8 @@ from(bucket: "{INFLUX_BUCKET}")
                 query = f'''
 from(bucket: "{INFLUX_BUCKET}")
   |> range(start: {t_from}, stop: {t_to})
-  |> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}")
+  |> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}"
+                       and r.server == "{_STAND_ID}")
   |> group()
   |> sort(columns: ["_time"])
 '''

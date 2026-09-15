@@ -11,8 +11,9 @@ from datetime import datetime
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-# все документы (протоколы) складываем в папку проекта documents/
-DOCUMENTS_DIR = Path(__file__).parent.parent.parent / "documents"
+# все документы (протоколы) складываем в папку данных стенда stands/<id>/documents
+import stand
+DOCUMENTS_DIR = stand.data_dir() / "documents"
 _OUT_DIR = DOCUMENTS_DIR
 
 # служебные ключи form-значений мастера — в протокол не выводим

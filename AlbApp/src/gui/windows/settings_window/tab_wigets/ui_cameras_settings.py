@@ -6,8 +6,10 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 import json, os
 
-_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "camera_settings.json")
-_SETTINGS_FILE = os.path.normpath(_SETTINGS_FILE)
+import stand
+
+# настройки камер — свои у каждого стенда
+_SETTINGS_FILE = str(stand.data_dir() / "camera_settings.json")
 
 
 def load_camera_settings() -> dict:

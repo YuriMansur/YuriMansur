@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
+import stand                   # Influx общая на все стенды — данные фильтруем по тегу server
+_STAND_ID = stand.current()["id"]
 
 from gui.windows.trengs_window._archive_worker import (
     INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET, LIVE_WINDOW_SECS,
@@ -119,7 +121,8 @@ class OverlayWorker(QThread):
         query = f'''
 from(bucket: "{INFLUX_BUCKET}")
   |> range(start: {_iso(t_from)}, stop: {_iso(t_to)})
-  |> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}")
+  |> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}"
+                       and r.server == "{_STAND_ID}")
   |> keep(columns: ["_time", "_value"])
 '''
         df = client.query_api().query_data_frame(query)

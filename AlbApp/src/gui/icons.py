@@ -284,6 +284,11 @@ def make_icon(kind: str, color: str, size: int = 24) -> QPixmap:
         p.drawEllipse(QPointF(12 * s, 12 * s), 3 * s, 3 * s)
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
+    elif kind == "menu":                      # меню вкладок — три полоски
+        p.setPen(_pen(col, s))
+        for y in (6, 12, 18):
+            p.drawLine(QPointF(4 * s, y * s), QPointF(20 * s, y * s))
+
     else:                                     # sensor — шкала со стрелкой
         p.setPen(_pen(col, s))
         p.setBrush(Qt.BrushStyle.NoBrush)

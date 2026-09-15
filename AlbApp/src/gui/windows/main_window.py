@@ -1,5 +1,5 @@
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QStackedWidget, QVBoxLayout, QHBoxLayout, QPushButton)
-from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QStackedWidget, QVBoxLayout, QPushButton)
+from PyQt6.QtCore import QTimer, QPoint, QEvent, QPropertyAnimation, QEasingCurve
 from gui.windows.experiment_window.ui_experiment_wiget import ExperimentWidget
 from gui.windows.trengs_window.trends_wiget import TrendsWiget
 from gui.windows.settings_window.ui_settings_wiget import SettingsWidget
@@ -20,15 +20,23 @@ def _load_log_tags() -> list:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):              
+    # Боковая панель навигации: открывается кнопкой «меню» (три полоски) в
+    # шапке, прячется при выборе вкладки или когда курсор с неё уходит.
+    # Контент занимает всё окно, панель ложится поверх него.
+    NAV_WIDTH   = 230   # ширина панели, px
+    NAV_ANIM_MS = 180
+
+    def __init__(self):
         super().__init__()
 # Настройка главного экрана
 
-        # Настройка окна                      
-        self.setWindowTitle("AlbApp")
+        # Настройка окна: заголовок и шапка — с именем стенда этого процесса
+        import stand
+        self._stand = stand.current()
+        self.setWindowTitle(f"AlbApp — {self._stand['title']}")
 
-        #Установка стартового окна в контейнере                       
-        self.current_page = 0                
+        #Установка стартового окна в контейнере
+        self.current_page = 0
 
         # Создание виджета
         central_widget = QWidget()
@@ -43,33 +51,83 @@ class MainWindow(QMainWindow):
         # Внутренние отступы лэйаута.
         self.main_layout.setContentsMargins(4, 4, 4, 4)
 
+        self._dark_mode = True
+
         # Расстояние между виджетами внутри лэйаута
         self.main_layout.setSpacing(0)
         main_layout = self.main_layout
 
-        # Создание верхней панели навигации   
-        self.create_top_navigation()
+        # Шапка: слева кнопка меню вкладок, по центру крупно номер стенда —
+        # окон может быть несколько (по одному на стенд), оператор должен
+        # видеть, к какому относится это
+        from PyQt6.QtWidgets import QLabel, QHBoxLayout
+        from PyQt6.QtCore import Qt, QSize
+        self._header = QWidget()
+        self._header.setObjectName("stand_header")
+        self._header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._header.setFixedHeight(44)
+        hdr = QHBoxLayout(self._header)
+        hdr.setContentsMargins(6, 4, 6, 4)
+        hdr.setSpacing(0)
+        self._btn_menu = QPushButton()
+        self._btn_menu.setObjectName("menu_btn")
+        self._btn_menu.setFixedSize(36, 36)
+        self._btn_menu.setIconSize(QSize(22, 22))
+        self._btn_menu.setToolTip("Меню вкладок")
+        self._btn_menu.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_menu.clicked.connect(lambda: self._set_nav_shown(not self._nav_shown))
+        # Кнопка сброса аварий — в правом углу шапки, всегда на виду.
+        # Иконка — треугольник аварии в круговой стрелке, рисуется кодом
+        # (gui/icons.py), белым по красному фону кнопки.
+        from PyQt6.QtGui import QIcon
+        from gui.icons import make_icon
+        self._btn_reset_nav = QPushButton(" Сброс аварий")
+        self._btn_reset_nav.setIcon(QIcon(make_icon("reset_fault", "#ffffff", 20)))
+        self._btn_reset_nav.setIconSize(QSize(20, 20))
+        self._btn_reset_nav.setFixedHeight(36)
+        self._btn_reset_nav.setToolTip("Сброс аварий")
+        self._btn_reset_nav.setStyleSheet(
+            "QPushButton { background: #c0392b; color: white; font-weight: bold;"
+            " border-radius: 4px; padding: 0 14px; }"
+            "QPushButton:hover { background: #e74c3c; }"
+        )
+        # слева — кнопка меню в контейнере той же ширины, что «Сброс аварий»
+        # справа: тогда название стенда стоит точно по центру
+        left = QWidget()
+        left_lay = QHBoxLayout(left)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.addWidget(self._btn_menu)
+        left_lay.addStretch()
+        left.setFixedWidth(self._btn_reset_nav.sizeHint().width())
+        hdr.addWidget(left)
+        self._stand_header = QLabel(self._stand["title"])
+        self._stand_header.setObjectName("stand_title")
+        self._stand_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr.addWidget(self._stand_header, 1)
+        hdr.addWidget(self._btn_reset_nav)
+        main_layout.addWidget(self._header)
 
-        # Добавление страницы в лэйаут
-        main_layout.addWidget(self.top_nav_panel)    
-        
         # Виджет контента
         content_widget = QWidget()
 
-        # Добавление лэйаута                  
-        content_layout = QVBoxLayout(content_widget) 
+        # Добавление лэйаута
+        content_layout = QVBoxLayout(content_widget)
 
         # Внутренние отступы лэйаута.
-        content_layout.setContentsMargins(0, 0, 0, 0)   
+        content_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Контейнер для страниц   
-        self.stacked_widget = QStackedWidget()          
+        # Контейнер для страниц
+        self.stacked_widget = QStackedWidget()
+
+        # Боковая панель — поверх контента, вне лэйаута. Создаётся до страниц:
+        # create_pages вешает на её кнопку «Сброс аварий» запись тега
+        self.create_side_navigation()
 
         # Создание страниц
-        self.create_pages()                  
+        self.create_pages()
 
         # Добавление контейнера в лэйаут контента
-        content_layout.addWidget(self.stacked_widget)     
+        content_layout.addWidget(self.stacked_widget)
 
         # Добавление контента в основной лэйаут
         main_layout.addWidget(content_widget)
@@ -77,21 +135,28 @@ class MainWindow(QMainWindow):
         # Устанавливаем первую страницу активной
         self.switch_page(0)
         QTimer.singleShot(0, self.apply_theme)
-        
-#Создание верхней панели навигации
-    def create_top_navigation(self):
 
-        # Создание виджета верхней панели
-        self.top_nav_panel = QWidget()
+#Создание боковой панели навигации
+    def create_side_navigation(self):
+
+        # Панель — дочерний виджет центрального, но не в его лэйауте:
+        # позиционируется вручную и накладывается поверх контента
+        central = self.centralWidget()
+        self.nav_panel = QWidget(central)
+        self.nav_panel.setObjectName("nav_panel")
+        # иначе фон из стиля по objectName у голого QWidget не рисуется
+        from PyQt6.QtCore import Qt
+        self.nav_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.nav_panel.setFixedWidth(self.NAV_WIDTH)
 
         # Создание основного лэйаута панели навигации
-        nav_layout = QHBoxLayout(self.top_nav_panel)
+        nav_layout = QVBoxLayout(self.nav_panel)
 
         # Внутренние отступы лэйаута
-        nav_layout.setContentsMargins(10, 5, 10, 5)
+        nav_layout.setContentsMargins(6, 10, 6, 10)
 
         # Расстояние между виджетами внутри лэйаута
-        nav_layout.setSpacing(0)
+        nav_layout.setSpacing(2)
 
         # Кнопки навигации
         self.nav_buttons = []
@@ -112,10 +177,10 @@ class MainWindow(QMainWindow):
         for i, (title, color, icon_kind) in enumerate(page_data):
 
             # Создание кнопки навигации
-            btn = NavigationButton(title, color, icon_kind)
+            btn = NavigationButton(title, color, icon_kind, vertical=True)
 
             # Добавление возможности переключения
-            btn.setCheckable(True) 
+            btn.setCheckable(True)
 
             # Подключение сигнала клика к переключению страницы
             btn.clicked.connect(lambda checked, idx = i: self.switch_page(idx))
@@ -126,28 +191,56 @@ class MainWindow(QMainWindow):
             # Добавление кнопки в лайаут панели навигации
             nav_layout.addWidget(btn)
 
-        # Добавление растяжки для выравнивания кнопок влево
+        # Растяжка: кнопки вкладок прижаты к верху панели
         nav_layout.addStretch()
 
-        # Кнопка сброса аварий (справа, где раньше были «Протоколы»).
-        # Иконка — треугольник аварии в круговой стрелке, рисуется кодом
-        # (gui/icons.py), белым по красному фону кнопки.
-        from PyQt6.QtGui import QIcon
-        from PyQt6.QtCore import QSize
-        from gui.icons import make_icon
-        self._btn_reset_nav = QPushButton(" Сброс аварий")
-        self._btn_reset_nav.setIcon(QIcon(make_icon("reset_fault", "#ffffff", 20)))
-        self._btn_reset_nav.setIconSize(QSize(20, 20))
-        self._btn_reset_nav.setFixedHeight(36)
-        self._btn_reset_nav.setToolTip("Сброс аварий")
-        self._btn_reset_nav.setStyleSheet(
-            "QPushButton { background: #c0392b; color: white; font-weight: bold;"
-            " border-radius: 4px; padding: 0 14px; }"
-            "QPushButton:hover { background: #e74c3c; }"
-        )
-        nav_layout.addWidget(self._btn_reset_nav)
+        # Выезд/уход панели — анимация позиции; скрытое состояние — за левым краем
+        self._nav_shown = False
+        self._nav_anim = QPropertyAnimation(self.nav_panel, b"pos", self)
+        self._nav_anim.setDuration(self.NAV_ANIM_MS)
+        self._nav_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._layout_nav_panel()
+        central.installEventFilter(self)     # подгонять высоту под окно
 
-        self._dark_mode = True
+        # Слежение за курсором (как у накладной панели камер): открытая панель
+        # прячется, когда курсор с неё уходит
+        self._nav_timer = QTimer(self)
+        self._nav_timer.setInterval(80)
+        self._nav_timer.timeout.connect(self._track_nav_hover)
+        self._nav_timer.start()
+
+    def _layout_nav_panel(self):
+        """Панель на всю высоту центрального виджета; скрытая — за левым краем."""
+        central = self.centralWidget()
+        self.nav_panel.setFixedHeight(central.height())
+        if not self._nav_shown and self._nav_anim.state() != QPropertyAnimation.State.Running:
+            self.nav_panel.move(-self.NAV_WIDTH, 0)
+        self.nav_panel.raise_()
+
+    def _set_nav_shown(self, shown: bool):
+        if shown == self._nav_shown:
+            return
+        self._nav_shown = shown
+        self.nav_panel.raise_()
+        self._nav_anim.stop()
+        self._nav_anim.setStartValue(self.nav_panel.pos())
+        self._nav_anim.setEndValue(QPoint(0 if shown else -self.NAV_WIDTH, 0))
+        self._nav_anim.start()
+
+    def _track_nav_hover(self):
+        if not self._nav_shown:
+            return
+        from PyQt6.QtGui import QCursor
+        central = self.centralWidget()
+        pos = central.mapFromGlobal(QCursor.pos())
+        # небольшой запас справа, чтобы панель не дёргалась на границе
+        if not central.rect().contains(pos) or pos.x() > self.NAV_WIDTH + 12:
+            self._set_nav_shown(False)
+
+    def eventFilter(self, obj, event):
+        if obj is self.centralWidget() and event.type() == QEvent.Type.Resize:
+            self._layout_nav_panel()
+        return super().eventFilter(obj, event)
 
 #Создание страниц
     def create_pages(self):
@@ -203,7 +296,7 @@ class MainWindow(QMainWindow):
             from tag_binder import tags
             tags.write("cmdResetFault", 1)   # одиночная запись TRUE на сервер (RESET_FAULT)
             # мигание НЕ гасим локально: авария снимется по фронту general_fault 1→0 от ПЛК
-        self._btn_reset_nav.clicked.connect(_reset_faults)   # «Сброс аварий» на верхней панели
+        self._btn_reset_nav.clicked.connect(_reset_faults)   # «Сброс аварий» в правом углу шапки
 
         # Авария по тегу general_fault: читаем тег с ПЛК и по фронту 0→1
         # поднимаем аварию: мигание рамки + прерывание в секции 3. По фронту
@@ -403,6 +496,24 @@ class MainWindow(QMainWindow):
         text_color = "#ecf0f1" if self._dark_mode else "#1a1a1a"
         for btn in self.nav_buttons:
             btn.set_text_color(text_color)
+        # шапка с номером стенда и кнопкой меню
+        if getattr(self, "_header", None) is not None:
+            from PyQt6.QtGui import QIcon
+            from gui.icons import make_icon
+            fg, bg = (("#ecf0f1", "#2b2b2b") if self._dark_mode else ("#1a1a1a", "#dcdcdc"))
+            self._header.setStyleSheet(
+                f"QWidget#stand_header {{ background: {bg}; border-radius: 4px; }}"
+                f"QLabel#stand_title {{ color: {fg}; font-size: 22px; font-weight: bold;"
+                " letter-spacing: 1px; }"
+                "QPushButton#menu_btn { background: transparent; border: none; border-radius: 4px; }"
+                "QPushButton#menu_btn:hover { background: rgba(128, 128, 128, 0.25); }")
+            self._btn_menu.setIcon(QIcon(make_icon("menu", fg, 22)))
+        # фон панели непрозрачный — она ложится поверх контента
+        if getattr(self, "nav_panel", None) is not None:
+            bg, border = (("#232323", "#4a4a4a") if self._dark_mode
+                          else ("#e9e9e9", "#b8b8b8"))
+            self.nav_panel.setStyleSheet(
+                f"QWidget#nav_panel {{ background: {bg}; border-right: 1px solid {border}; }}")
         if hasattr(self, "stacked_widget"):
             for i in range(self.stacked_widget.count()):
                 w = self.stacked_widget.widget(i)
@@ -435,6 +546,10 @@ class MainWindow(QMainWindow):
         # Обновление состояния кнопок навигации
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
+
+        # вкладка выбрана — панель уезжает, контент открыт целиком
+        if getattr(self, "nav_panel", None) is not None:
+            self._set_nav_shown(False)
 
     def closeEvent(self, event):
         # остановить фоновые потоки захвата камер, иначе приложение висит на выходе
