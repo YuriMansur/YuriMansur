@@ -78,6 +78,58 @@ def _spawn_detached_win(exe: str, args: str, cwd: str) -> int:
     raise ctypes.WinError(ERROR_ACCESS_DENIED)
 
 
+class _StandCombo(QComboBox):
+    """Выпадающий список стендов с явным оформлением.
+
+    У стиля Fusion список для такого поля раскрывается «поверх» него —
+    отдельным окошком по ширине самого длинного пункта, и поле визуально
+    меняет размер. combobox-popup: 0 переводит его в обычный выпадающий
+    список под полем, ровно по его ширине. Тёмная палитра — как у приложения.
+    """
+
+    _STYLE = """
+        QComboBox {
+            combobox-popup: 0;
+            background: #2c2c2c; color: #ecf0f1;
+            border: 1px solid #555555; border-radius: 4px;
+            padding: 4px 10px; font-size: 14px;
+        }
+        QComboBox:hover { border-color: #3498db; }
+        QComboBox:disabled { color: #888888; background: #262626; }
+        QComboBox::drop-down { border: none; width: 28px; }
+        QComboBox::down-arrow { image: url("%ARROW%"); width: 14px; height: 14px; }
+        QComboBox QAbstractItemView {
+            background: #2c2c2c; color: #ecf0f1;
+            border: 1px solid #555555; outline: none;
+            selection-background-color: #3498db; selection-color: #ffffff;
+            font-size: 14px;
+        }
+        QComboBox QAbstractItemView::item { min-height: 30px; padding: 0 10px; }
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.setStyleSheet(self._STYLE.replace("%ARROW%", self._arrow_png()))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    @staticmethod
+    def _arrow_png() -> str:
+        """Стрелка ▼ для поля: рисуется кодом (gui/icons.py) и кладётся во
+        временный файл — стилю нужен путь к картинке. Без неё поле выглядит
+        как обычная надпись, а не как выпадающий список."""
+        import tempfile
+        from gui.icons import make_icon
+        path = Path(tempfile.gettempdir()) / "albapp_combo_arrow.png"
+        if not path.exists():
+            make_icon("arrow_down", "#ecf0f1", 14).save(str(path))
+        return path.as_posix()
+
+    def showPopup(self):
+        # список ровно по ширине поля
+        self.view().setFixedWidth(self.width())
+        super().showPopup()
+
+
 class StandPicker(QWidget):
     """Выпадающий список стендов, которые ещё не открыты, и кнопка «Открыть».
     Открытый стенд из списка пропадает (lock-файл пишется сразу при запуске),
@@ -102,9 +154,8 @@ class StandPicker(QWidget):
         lay.addWidget(hint)
 
         row = QHBoxLayout()
-        self._combo = QComboBox()
+        self._combo = _StandCombo()
         self._combo.setMinimumHeight(34)
-        self._combo.currentIndexChanged.connect(self._on_pick)
         row.addWidget(self._combo, 1)
         self._btn_open = QPushButton("Открыть")
         self._btn_open.setFixedSize(110, 34)
@@ -113,9 +164,6 @@ class StandPicker(QWidget):
         row.addWidget(self._btn_open)
         lay.addLayout(row)
 
-        self._lbl_ep = QLabel("")                     # адрес ПЛК выбранного стенда
-        self._lbl_ep.setStyleSheet("color: #888888; font-size: 11px;")
-        lay.addWidget(self._lbl_ep)
         self._lbl_open = QLabel("")                   # какие стенды уже открыты
         self._lbl_open.setStyleSheet("color: #888888;")
         lay.addWidget(self._lbl_open)
@@ -127,10 +175,6 @@ class StandPicker(QWidget):
         self._poll.setInterval(1000)
         self._poll.timeout.connect(self._refresh)
         self._poll.start()
-
-    def _on_pick(self, _idx: int):
-        st = self._combo.currentData()
-        self._lbl_ep.setText(st.get("endpoint", "") if st else "")
 
     def _launch(self):
         st = self._combo.currentData()
@@ -175,7 +219,6 @@ class StandPicker(QWidget):
             if cur and cur["id"] in ids:
                 self._combo.setCurrentIndex(ids.index(cur["id"]))
             self._combo.blockSignals(False)
-            self._on_pick(self._combo.currentIndex())
 
         none = not free
         self._combo.setEnabled(not none)

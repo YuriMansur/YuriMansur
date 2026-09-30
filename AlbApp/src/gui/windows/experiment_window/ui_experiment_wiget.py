@@ -28,12 +28,14 @@ class ExperimentWidget(QWidget):
         self._sec2 = sec2
         self._sec3 = sec3
         sec2.params_changed.connect(sec3.set_params)
+        # уровень нагрузки и условие → расчёт смещений на шаге «Установка образца»
+        def _push_load_params(*_):
+            sec3.set_load_params(sec2.cb_load.currentText(), sec2.cb_cond.currentText())
+        sec2.cb_load.currentTextChanged.connect(_push_load_params)
+        sec2.cb_cond.currentTextChanged.connect(_push_load_params)
+        _push_load_params()
         sec3.set_sample_info_provider(sec2.sample_info)   # «инфо об образце» → протокол
         sec3.set_params(sec2.cb_std.currentText(), sec2.cb_method.currentText())
-
-        # started приходит на каждом шаге мастера; камеры дёргаем только по
-        # фронту — иначе каждый переход перезапускал бы запись
-        self._test_running = False
 
         def _on_started(running: bool):
             for w in (sec2.cb_std, sec2.cb_load, sec2.cb_cond, sec2.cb_method):
@@ -42,12 +44,25 @@ class ExperimentWidget(QWidget):
             if getattr(self, "_sec1", None) is not None:
                 set_manual_controls_enabled(self._sec1, not running)
                 set_test_running(self._sec1, running)
-                if running != self._test_running:
-                    # старт → камеры открыть и писать; конец/прерывание → стоп и закрыть
-                    set_cameras_test_mode(self._sec1, running)
-            self._test_running = running
 
         sec3.started.connect(_on_started)
+
+        # Запись данных в БД и видео с камер — только пока выполняется шаг
+        # нагружения (нажата кнопка шага → до готовности ПЛК / смены шага).
+        # Дублирующие значения recording отсекаем по фронту.
+        self._recording = False
+
+        def _on_recording(rec: bool):
+            if rec == self._recording:
+                return
+            self._recording = rec
+            from tag_binder import tags
+            tags.write("__record", 1 if rec else 0)   # служебная команда воркеру, не тег ПЛК
+            if getattr(self, "_sec1", None) is not None:
+                # нагружение → камеры открыть и писать; конец → стоп и закрыть
+                set_cameras_test_mode(self._sec1, rec)
+
+        sec3.recording.connect(_on_recording)
 
         self._col_frames = []
         for i in range(1, 5):

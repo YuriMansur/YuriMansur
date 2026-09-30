@@ -31,13 +31,15 @@ class FWindow(QWidget):
         self.setMinimumSize(400, 300)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(0, 0, 0, 0)   # отступы даёт рамка секции «Настроек»
 
-        row_layout = QHBoxLayout()
-        row_layout.setSpacing(32)
+        # блоки друг под другом: секция «Настроек» узкая (полэкрана), а поля
+        # стенда — длинные строки, им нужна вся ширина
+        row_layout = QVBoxLayout()
+        row_layout.setSpacing(12)
         row_layout.setAlignment(__import__('PyQt6.QtCore', fromlist=['Qt']).Qt.AlignmentFlag.AlignTop)
 
-        # ── Левая колонка: параметры F ──────────────────────────────────────
+        # ── Параметры испытания (F) ─────────────────────────────────────────
         content_frame = QFrame()
         content_frame.setObjectName("section")
         content_frame.setStyleSheet("QFrame#section { border: 1px solid #555555; border-radius: 4px; }")
@@ -81,7 +83,7 @@ class FWindow(QWidget):
         content_layout.addLayout(self.form)
         content_layout.addWidget(self._btn_write)
 
-        # ── Правая колонка: сведения о стенде ───────────────────────────────
+        # ── Сведения о стенде (в ряду идёт первым) ───────────────────────────
         stand_frame = QFrame()
         stand_frame.setObjectName("section")
         stand_frame.setStyleSheet("QFrame#section { border: 1px solid #555555; border-radius: 4px; }")
@@ -96,6 +98,9 @@ class FWindow(QWidget):
         self.stand_form = QFormLayout()
         self.stand_form.setVerticalSpacing(6)
         self.stand_form.setHorizontalSpacing(8)
+        # поля стенда (марка, серийник, дата) — длинные строки: растягиваем на
+        # всю ширину блока, а сам блок занимает свободное место ряда
+        self.stand_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.stand_inputs = {}
         for label, key in STAND_FIELDS:
             inp = QLineEdit()
@@ -111,9 +116,10 @@ class FWindow(QWidget):
         stand_layout.addLayout(self.stand_form)
         stand_layout.addWidget(self._btn_stand)
 
+        # порядок: сначала оборудование стенда, затем параметры испытания
         from PyQt6.QtCore import Qt as _Qt
-        row_layout.addWidget(content_frame, 0, _Qt.AlignmentFlag.AlignTop)
         row_layout.addWidget(stand_frame,   0, _Qt.AlignmentFlag.AlignTop)
+        row_layout.addWidget(content_frame, 0, _Qt.AlignmentFlag.AlignTop)
 
         layout.addLayout(row_layout)
         layout.addStretch()

@@ -1,30 +1,225 @@
 {
-  "f_fields": ["Fstab", "Fset", "Fsp", "F_su_lower_level", "F_su_upper_level"],
+  "f_fields": [
+    "Fstab",
+    "Fset",
+    "Fsp",
+    "F_su_lower_level",
+    "F_su_upper_level"
+  ],
   "stand_fields": [
-    {"key": "stand_model",  "label": "Марка и модель стенда:"},
-    {"key": "stand_serial", "label": "Серийный номер стенда:"},
-    {"key": "stand_date",   "label": "Дата аттестации стенда:"},
-    {"key": "si1_model",    "label": "Марка и модель СИ 1:"},
-    {"key": "si2_model",    "label": "Марка и модель СИ 2:"}
+    {
+      "key": "stand_model",
+      "label": "Марка и модель стенда:"
+    },
+    {
+      "key": "stand_serial",
+      "label": "Серийный номер стенда:"
+    },
+    {
+      "key": "stand_date",
+      "label": "Дата аттестации стенда:"
+    },
+    {
+      "key": "si1_model",
+      "label": "Марка и модель СИ 1:"
+    },
+    {
+      "key": "si2_model",
+      "label": "Марка и модель СИ 2:"
+    }
   ],
   "gosts": {
     "Р53868-2021": {
-      "load_levels": ["P1", "P2"],
-      "conditions":  ["I", "II"],
-      "fields":      ["Fstab", "F_su_lower_level", "F_su_upper_level"],
-      "methods":     ["16.3", "17.4.5"]
+      "load_levels": [
+        "P1",
+        "P2"
+      ],
+      "conditions": [
+        "I",
+        "II"
+      ],
+      "fields": [
+        "Fstab",
+        "F_su_lower_level",
+        "F_su_upper_level"
+      ],
+      "methods": [
+        "16.3",
+        "17.4.5"
+      ]
     },
     "Р ИСО 10328-2021": {
-      "load_levels": ["P3", "P4", "P5", "P6", "P7", "P8"],
-      "conditions":  ["I", "II"],
-      "fields":      ["Fstab", "Fset", "Fcr", "Fcmin", "Fcmax", "Fcmean"],
-      "methods":     ["16.3", "17.4.5"]
+      "load_levels": [
+        "P3",
+        "P4",
+        "P5",
+        "P6",
+        "P7",
+        "P8"
+      ],
+      "conditions": [
+        "I",
+        "II"
+      ],
+      "fields": [
+        "Fstab",
+        "Fset",
+        "Fcr",
+        "Fcmin",
+        "Fcmax",
+        "Fcmean"
+      ],
+      "methods": [
+        "16.3",
+        "17.4.5"
+      ]
     },
     "Р ИСО 22675-2019": {
-      "load_levels": ["A60", "A80", "A100"],
-      "conditions":  [],
-      "fields":      ["Fstab", "Fset", "Fsp", "F_su_lower_level", "F_su_upper_level"],
-      "methods":     ["6.4.4"]
+      "load_levels": [
+        "A60",
+        "A80",
+        "A100"
+      ],
+      "conditions": [],
+      "fields": [
+        "Fstab",
+        "Fset",
+        "Fsp",
+        "F_su_lower_level",
+        "F_su_upper_level"
+      ],
+      "methods": [
+        "6.4.4"
+      ]
+    }
+  },
+  "displacements": {
+    "source": "ГОСТ Р ИСО 10328-2021, таблица 6 — значения смещений при основных испытаниях (см. 16.2 и 16.3)",
+    "u": {
+      "K": 500,
+      "A": 80
+    },
+    "planes": [
+      "T",
+      "K",
+      "A",
+      "B"
+    ],
+    "values": {
+      "P5": {
+        "I": {
+          "T": [
+            82,
+            -79
+          ],
+          "K": [
+            52,
+            -50
+          ],
+          "A": [
+            -32,
+            30
+          ],
+          "B": [
+            -48,
+            45
+          ]
+        },
+        "II": {
+          "T": [
+            55,
+            -40
+          ],
+          "K": [
+            72,
+            -35
+          ],
+          "A": [
+            120,
+            -22
+          ],
+          "B": [
+            129,
+            -19
+          ]
+        }
+      },
+      "P4": {
+        "I": {
+          "T": [
+            89,
+            -74
+          ],
+          "K": [
+            56,
+            -48
+          ],
+          "A": [
+            -35,
+            25
+          ],
+          "B": [
+            -52,
+            39
+          ]
+        },
+        "II": {
+          "T": [
+            51,
+            -44
+          ],
+          "K": [
+            68,
+            -39
+          ],
+          "A": [
+            115,
+            -24
+          ],
+          "B": [
+            124,
+            -22
+          ]
+        }
+      },
+      "P3": {
+        "I": {
+          "T": [
+            81,
+            -85
+          ],
+          "K": [
+            49,
+            -57
+          ],
+          "A": [
+            -41,
+            24
+          ],
+          "B": [
+            -58,
+            39
+          ]
+        },
+        "II": {
+          "T": [
+            51,
+            -49
+          ],
+          "K": [
+            68,
+            -43
+          ],
+          "A": [
+            115,
+            -26
+          ],
+          "B": [
+            124,
+            -23
+          ]
+        }
+      }
     }
   }
 }

@@ -25,6 +25,7 @@ class MainWindow(QMainWindow):
     # Контент занимает всё окно, панель ложится поверх него.
     NAV_WIDTH   = 230   # ширина панели, px
     NAV_ANIM_MS = 180
+    STAND_TITLE_COLOR = "#f1c40f"   # надпись с номером стенда в шапке — жёлтый
 
     def __init__(self):
         super().__init__()
@@ -165,7 +166,7 @@ class MainWindow(QMainWindow):
         # значки рисуются кодом (gui/icons.py) и перекрашиваются вместе с надписью
         page_data = [
             (" Испытания",          "#1abc9c", "flask"),
-            (" Видеоналожение",     "#e74c3c", "video"),
+            (" Видеоналожение",     "#6c5ce7", "video"),
             (" Тренды",             "#3498db", "chart"),
             (" Сообщения",          "#e67e22", "chat"),
             (" Экспорт",            "#27ae60", "export"),
@@ -209,12 +210,19 @@ class MainWindow(QMainWindow):
         self._nav_timer.timeout.connect(self._track_nav_hover)
         self._nav_timer.start()
 
+    def _nav_top(self) -> int:
+        """Верх панели — под шапкой: кнопка ☰ и название стенда остаются видны,
+        повторное нажатие ☰ закрывает панель."""
+        hdr = getattr(self, "_header", None)
+        return hdr.geometry().bottom() + 1 if hdr is not None else 0
+
     def _layout_nav_panel(self):
-        """Панель на всю высоту центрального виджета; скрытая — за левым краем."""
+        """Панель от низа шапки до низа окна; скрытая — за левым краем."""
         central = self.centralWidget()
-        self.nav_panel.setFixedHeight(central.height())
-        if not self._nav_shown and self._nav_anim.state() != QPropertyAnimation.State.Running:
-            self.nav_panel.move(-self.NAV_WIDTH, 0)
+        top = self._nav_top()
+        self.nav_panel.setFixedHeight(max(0, central.height() - top))
+        if self._nav_anim.state() != QPropertyAnimation.State.Running:
+            self.nav_panel.move(0 if self._nav_shown else -self.NAV_WIDTH, top)
         self.nav_panel.raise_()
 
     def _set_nav_shown(self, shown: bool):
@@ -224,7 +232,7 @@ class MainWindow(QMainWindow):
         self.nav_panel.raise_()
         self._nav_anim.stop()
         self._nav_anim.setStartValue(self.nav_panel.pos())
-        self._nav_anim.setEndValue(QPoint(0 if shown else -self.NAV_WIDTH, 0))
+        self._nav_anim.setEndValue(QPoint(0 if shown else -self.NAV_WIDTH, self._nav_top()))
         self._nav_anim.start()
 
     def _track_nav_hover(self):
@@ -500,10 +508,15 @@ class MainWindow(QMainWindow):
         if getattr(self, "_header", None) is not None:
             from PyQt6.QtGui import QIcon
             from gui.icons import make_icon
+            # Фон шапки — нейтральный по теме; сама надпись — одним ярким
+            # цветом, который в интерфейсе больше нигде не занят (вкладки —
+            # бирюза/синий/оранжевый/зелёный/розовый/фиолетовый, красный — за
+            # аварией и сбросом). Жёлтый — свободен и виден в обеих темах.
             fg, bg = (("#ecf0f1", "#2b2b2b") if self._dark_mode else ("#1a1a1a", "#dcdcdc"))
+            accent = self.STAND_TITLE_COLOR
             self._header.setStyleSheet(
                 f"QWidget#stand_header {{ background: {bg}; border-radius: 4px; }}"
-                f"QLabel#stand_title {{ color: {fg}; font-size: 22px; font-weight: bold;"
+                f"QLabel#stand_title {{ color: {accent}; font-size: 22px; font-weight: bold;"
                 " letter-spacing: 1px; }"
                 "QPushButton#menu_btn { background: transparent; border: none; border-radius: 4px; }"
                 "QPushButton#menu_btn:hover { background: rgba(128, 128, 128, 0.25); }")

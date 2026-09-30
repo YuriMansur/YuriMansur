@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QFileIconProvider, QStyle, QApplication,
 )
-from PyQt6.QtCore import Qt, QFileInfo, QFileSystemWatcher
+from PyQt6.QtCore import QTimer, Qt, QFileInfo, QFileSystemWatcher
 
 from gui.windows.messages_window.messages_viewer import table_style
 
@@ -38,6 +38,11 @@ class ProtocolsWidget(QWidget):
         bar = QHBoxLayout()
         _st = self.style()
 
+        # заголовок слева, сразу за ним — навигация по папкам (назад / вверх)
+        title = QLabel("Протоколы/Журналы")
+        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #e84393;")
+        bar.addWidget(title)
+
         self._btn_back = QPushButton()
         self._btn_back.setIcon(_st.standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
         self._btn_back.setToolTip("Назад")
@@ -53,15 +58,18 @@ class ProtocolsWidget(QWidget):
         self._btn_up.clicked.connect(self._go_up)
         self._btn_up.setEnabled(False)
         bar.addWidget(self._btn_up)
-
-        title = QLabel("Протоколы/Журналы")
-        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #e84393;")
-        bar.addWidget(title, 1)
-
-        btn_reload = QPushButton("⟳ Обновить")
-        btn_reload.clicked.connect(self.reload)
-        bar.addWidget(btn_reload)
+        bar.addStretch(1)
         root.addLayout(bar)
+
+        # Автообновление. Watcher ловит появление/удаление/переименование в
+        # папке, но не изменение самих файлов; таймер добирает остальное и
+        # подстраховывает watcher (сетевые папки). Таблица пересобирается
+        # только если содержимое реально изменилось — см. reload().
+        self._snapshot = None
+        self._auto = QTimer(self)
+        self._auto.setInterval(2000)
+        self._auto.timeout.connect(self.reload)
+        self._auto.start()
 
         self._tbl = QTableWidget(0, 2)
         self._tbl.setHorizontalHeaderLabels(["Имя", "Дата"])
@@ -134,6 +142,17 @@ class ProtocolsWidget(QWidget):
         dirs  = sorted((p for p in entries if p.is_dir()),  key=lambda p: p.stat().st_mtime, reverse=True)
         files = sorted((p for p in entries if p.is_file()), key=lambda p: p.stat().st_mtime, reverse=True)
 
+        at_root = self._cwd == _DOCS_DIR
+        self._btn_up.setEnabled(not at_root)
+        self._btn_back.setEnabled(bool(self._history))
+
+        # ничего не изменилось — не трогаем таблицу (иначе автообновление
+        # каждые пару секунд сбрасывало бы выделение)
+        snapshot = (str(self._cwd), tuple((p.name, p.stat().st_mtime) for p in dirs + files))
+        if snapshot == self._snapshot:
+            return
+        self._snapshot = snapshot
+
         sb = self._tbl.verticalScrollBar()
         pos = sb.value()
         self._tbl.setRowCount(0)
@@ -142,9 +161,6 @@ class ProtocolsWidget(QWidget):
             self._row(i, p)
         sb.setValue(min(pos, sb.maximum()))
 
-        at_root = self._cwd == _DOCS_DIR
-        self._btn_up.setEnabled(not at_root)
-        self._btn_back.setEnabled(bool(self._history))
         if at_root:
             self._status.setText(f"Испытаний: {len(dirs)}")
         else:

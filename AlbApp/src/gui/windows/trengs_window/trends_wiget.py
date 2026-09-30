@@ -244,13 +244,19 @@ class TrendsWiget(QWidget):
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(4)
 
-        # ── переключатель режимов ────────────────────────────────────────────
+        # ── заголовок экрана + переключатель режимов в одной строке ───────────
         self._nav_frame = QFrame()
         self._nav_frame.setStyleSheet(_nav_style(True))
         nav_frame = self._nav_frame
         row_mode = QHBoxLayout(nav_frame)
         row_mode.setContentsMargins(6, 4, 6, 4)
-        row_mode.setSpacing(6)
+        row_mode.setSpacing(10)
+
+        # заголовок слева (цвет вкладки «Тренды»), сразу за ним — Live/Архив
+        title = QLabel("Тренды")
+        title.setStyleSheet("font-size: 17px; font-weight: bold; color: #3498db;"
+                            " background: transparent;")
+        row_mode.addWidget(title)
 
         # Сегментный переключатель вместо выпадающего списка: режима всего два,
         # оба должны быть видны сразу — какой сейчас включён, читается без клика.

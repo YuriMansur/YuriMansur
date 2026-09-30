@@ -6,6 +6,7 @@ from PyQt6.QtCore import pyqtSignal, QTimer, Qt, QPoint, QSize
 from PyQt6.QtGui import QPainter, QColor, QPolygon, QIcon
 
 from tag_binder import tags, link   # теги ПЛК по имени + состояние связи с ПЛК
+import calc                          # формулы ГОСТ: смещения f/o по длинам сегментов
 from gui.icons import make_icon      # значки статусов рисуются кодом (см. gui/icons.py)
 from event_bus import bus     # живые значения потоков/тегов для карточек (cards)
 
@@ -511,7 +512,8 @@ class _HeaderFrame(QFrame):
 
 class _CyclicWizard(QWidget):
     """Пошаговый мастер испытания: шаги из PROCEDURES, стиль из темы приложения."""
-    started = pyqtSignal(bool)
+    started   = pyqtSignal(bool)   # испытание идёт (вне группы НАЧАЛО)
+    recording = pyqtSignal(bool)   # шаг нагружения выполняется: запись в БД и видео (см. _step_started)
 
     def __init__(self, gost: str, method: str, state: dict | None = None, parent=None):
         super().__init__(parent)
@@ -532,6 +534,11 @@ class _CyclicWizard(QWidget):
         # только видимые сейчас карточки (список пересобирается при каждом рендере шага —
         # так подписки не копятся и не ссылаются на удалённые QLabel).
         self._live_last: dict = {}     # имя потока/тега → последнее значение
+        self._step_active = False      # шаг нагружения выполняется (идёт запись)
+        self._level = ""               # уровень нагрузки (P3…) и условие (I/II) из секции 2 —
+        self._cond  = ""               # по ним берутся смещения базовых плоскостей (табл. 6)
+        self._calc_blocks: list = []   # блоки calc_fo текущего шага: (store, blk, cards, header)
+        self._done_subscribed: set = set()   # статусы «шаг выполнен», на которые уже подписаны
         self._live_cards: list = []    # [{label, src, fmt, unit}] — карточки текущего шага
         bus.stream_points.connect(self._on_live_points)   # tenza/displacement/setpoint
         bus.tag_state.connect(self._on_live_tag)           # скалярные теги (nowSetpoint…)
@@ -611,6 +618,42 @@ class _CyclicWizard(QWidget):
     # нажата «Начать испытание» (commands[EXPERIMENT_RUN] = TRUE), испытание идёт —
     # сек.2 блокирует выбор ГОСТ/методики, сек.1 — ручное управление стендом.
     _IDLE_GROUPS = ("НАЧАЛО",)
+
+    # Группы, на которых стенд реально нагружает образец. Только на их шагах
+    # возможна запись данных датчиков в БД и видео с камер: подготовка
+    # (установка образца, обнуление) и заполнение протокола записи не требуют.
+    _RECORD_GROUPS = ("НАГРУЖЕНИЕ", "ЦИКЛИЧЕСКОЕ НАГРУЖЕНИЕ")
+
+    def _emit_phase(self, idx: int) -> None:
+        """Сообщить наружу фазу мастера по группе шага idx.
+
+        Запись (recording) при смене шага всегда гасится: новый шаг ещё не
+        выполняется — стенд стоит, пока оператор не нажмёт кнопку шага
+        (см. _step_started). Выполненный шаг, на котором просто стоим, тоже
+        не пишется: recording снимается по сигналу готовности от ПЛК либо
+        при уходе с шага.
+        """
+        group = self._steps[idx]["group"]
+        self.started.emit(group not in self._IDLE_GROUPS)
+        self._set_step_active(False)
+
+    def _set_step_active(self, active: bool) -> None:
+        if active == self._step_active:
+            return
+        self._step_active = active
+        self.recording.emit(active)
+
+    def _step_started(self, blk: dict) -> None:
+        """Нажата кнопка шага нагружения — стенд начал выполнять шаг: включаем
+        запись. Выключится, когда ПЛК сообщит о выполнении (статус из поля
+        "done" кнопки, напр. "st:LOAD_DONE"), либо при уходе с шага."""
+        if self._steps[self._current]["group"] not in self._RECORD_GROUPS:
+            return
+        self._set_step_active(True)
+        done = blk.get("done")
+        if done and done not in self._done_subscribed:
+            self._done_subscribed.add(done)
+            tags.on(done, lambda val: bool(val) and self._set_step_active(False))
 
     def _build_steps(self):
         data = (_load_methodic(self._gost, self._method)
@@ -863,8 +906,9 @@ class _CyclicWizard(QWidget):
         self._jump_target = None   # стрелка-указатель снимается после перехода
         self._refresh_sidebar()
         self._render_step(idx)
-        # испытание считается «идущим» вне групп подготовки → блок комбобоксов сек.2
-        self.started.emit(self._steps[idx]["group"] not in self._IDLE_GROUPS)
+        # испытание считается «идущим» вне групп подготовки → блок комбобоксов
+        # сек.2; на группах нагружения → запись в БД и видео
+        self._emit_phase(idx)
 
     def _interrupt_test(self):
         """Кнопка «Прервать» — крупный стилизованный диалог подтверждения."""
@@ -952,7 +996,7 @@ class _CyclicWizard(QWidget):
         if self._items:
             active = self._items[proto]
             _defer(lambda: self._side_scroll.ensureWidgetVisible(active, 0, 40))
-        self.started.emit(self._steps[proto]["group"] not in self._IDLE_GROUPS)
+        self._emit_phase(proto)
 
     @staticmethod
     def _clear(lay):
@@ -986,6 +1030,7 @@ class _CyclicWizard(QWidget):
     def _render_step(self, idx: int, preview: bool = False):
         self._clear(self._content)
         self._live_cards = []      # карточки прошлого шага удалены _clear — забываем их
+        self._calc_blocks = []     # расчётные блоки прошлого шага — тоже
         self._nav_btns = []        # ­— то же для кнопок перехода (их блокируют статусы)
         self._step_locked = False  # снимается на каждом шаге; ставит _render_form
         self._previewing = preview
@@ -1048,9 +1093,118 @@ class _CyclicWizard(QWidget):
     # Описание берётся из JSON-конфига методики (step["body"]); значения полей
     # хранятся в self._form_values[step_id]. Блоки: button / text / note /
     # banner / fields / fixture.
+    def _form_setter(self, store: dict, key: str):
+        def _set(text):
+            store[key] = text
+            self._refresh_calcs()    # длины сегментов → расчётные смещения
+        return _set
+
+    def set_load_params(self, level: str, cond: str) -> None:
+        """Уровень нагрузки и условие нагружения (из секции 2) — для расчёта
+        смещений по таблице 6."""
+        self._level, self._cond = level, cond
+        self._refresh_calcs()
+
+    # ── расчётные смещения f/o по длинам сегментов (блок calc_fo) ────────────
+    _FO_FMT = "{:+.1f}"
+
+    def _render_calc_fo(self, c, store: dict, blk: dict):
+        """Четыре карточки: f и o для верхнего и нижнего сегмента. Значения
+        считаются из полей длин (blk["upper"]/blk["lower"] — ключи полей) и
+        уровня/условия нагружения; пересчёт — при любом изменении."""
+        header = QLabel("")
+        header.setWordWrap(True)
+        header.setStyleSheet(f"color: {_WZ['muted']}; font-size: 11px; background: transparent;")
+        c.addWidget(header)
+        # две карточки — по сегменту, в каждой f и o одной строкой: колонка
+        # мастера узкая, четыре плитки в ряд не читались
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        cards = {}
+        for key, caption, color in (("u", "Верхний сегмент", _WZ["blue"]),
+                                    ("l", "Нижний сегмент",  _WZ["green"])):
+            card = self._card("f = —\no = —\n√(f²+o²) = —\narctg(o/f) = —", color, caption)
+            cards[key] = card._val
+            row.addWidget(card, 1)
+        c.addLayout(row)
+        # формулы расчёта — общий вид и подстановка текущих чисел, чтобы
+        # оператор мог проверить результат вручную
+        formulas = QLabel("")
+        formulas.setWordWrap(True)
+        formulas.setTextFormat(Qt.TextFormat.RichText)
+        formulas.setStyleSheet(
+            f"color: {_WZ['muted']}; font-size: 11px; background: {_WZ['card_bg']};"
+            f" border: 1px solid {_WZ['border']}; border-radius: 6px; padding: 6px 8px;")
+        c.addWidget(formulas)
+        self._calc_blocks.append((store, blk, cards, header, formulas))
+        self._refresh_calcs()
+
     @staticmethod
-    def _form_setter(store: dict, key: str):
-        return lambda text: store.__setitem__(key, text)
+    def _formulas_html(planes, res: dict, lengths: dict, level: str, cond: str) -> str:
+        """HTML-текст блока «Формулы»: общий вид + подстановка для сегментов."""
+        k, a = planes["K"], planes["A"]
+        uk, ua = calc.U_K, calc.U_A
+        g = lambda v: f"{v:g}"          # числа без хвостовых нулей
+        p = lambda v: f"({v:g})" if v < 0 else f"{v:g}"      # отрицательные — в скобках
+        q = lambda v: f"({v:.1f})" if v < 0 else f"{v:.1f}"
+        lines = [
+            "<b>Формулы</b> (табл. 6, %s/%s):" % (level, cond),
+            "f<sub>X</sub> = f<sub>K</sub> + (f<sub>K</sub> − f<sub>A</sub>)(u<sub>X</sub> − u<sub>K</sub>) / (u<sub>K</sub> − u<sub>A</sub>)",
+            "o<sub>X</sub> = o<sub>K</sub> + (o<sub>K</sub> − o<sub>A</sub>)(u<sub>X</sub> − u<sub>K</sub>) / (u<sub>K</sub> − u<sub>A</sub>)",
+            "√(f² + o²); &nbsp;arctg(o / f)",
+            f"u<sub>K</sub> = {g(uk)}, u<sub>A</sub> = {g(ua)}; &nbsp;"
+            f"K: f = {g(k.f)}, o = {g(k.o)}; &nbsp;A: f = {g(a.f)}, o = {g(a.o)}",
+        ]
+        for seg, name in (("u", "Верхний"), ("l", "Нижний")):
+            fo, ux = res.get(seg), lengths.get(seg)
+            if fo is None or ux is None:
+                continue
+            lines.append(
+                f"<b>{name}</b> (u<sub>X</sub> = {g(ux)}): "
+                f"f = {p(k.f)} + ({p(k.f)} − {p(a.f)})·({g(ux)} − {g(uk)}) / {g(uk - ua)} = <b>{fo.f:+.1f}</b>; "
+                f"o = {p(k.o)} + ({p(k.o)} − {p(a.o)})·({g(ux)} − {g(uk)}) / {g(uk - ua)} = <b>{fo.o:+.1f}</b>; "
+                f"√({q(fo.f)}² + {q(fo.o)}²) = <b>{fo.resultant:.1f}</b>; "
+                f"arctg({q(fo.o)} / {q(fo.f)}) = <b>{fo.angle:+.1f}°</b>")
+        return "<br>".join(lines)
+
+    def _refresh_calcs(self):
+        for store, blk, cards, header, formulas in self._calc_blocks:
+            try:
+                header.text()            # виджет прошлого шага уже удалён — пропускаем
+            except RuntimeError:
+                continue
+            res = None
+            src = "нет уровня / условия нагружения"
+            html = ""
+            if self._level and self._cond:
+                planes = calc.base_planes(self._level, self._cond)
+                if planes is None:
+                    src = f"для {self._level}/{self._cond} нет данных в таблице 6"
+                else:
+                    def _num(key):
+                        try:
+                            return float(str(store.get(key, "")).replace(",", "."))
+                        except ValueError:
+                            return None
+                    up, lo = _num(blk.get("upper", "seg_upper")), _num(blk.get("lower", "seg_lower"))
+                    src = (f"Расчётные смещения (табл. 6, {self._level}/{self._cond}; "
+                           f"u_K = {calc.U_K:g}, u_A = {calc.U_A:g})")
+                    k, a = planes["K"], planes["A"]
+                    res = {"u": calc.segment_fo(up, k, a) if up is not None else None,
+                           "l": calc.segment_fo(lo, k, a) if lo is not None else None}
+                    html = self._formulas_html(planes, res, {"u": up, "l": lo},
+                                               self._level, self._cond)
+            header.setText(src)
+            formulas.setText(html)
+            formulas.setVisible(bool(html))
+            for seg in ("u", "l"):
+                fo = res.get(seg) if res else None
+                # далее — результирующее смещение √(f² + o²) и угол arctg(o/f)
+                cards[seg].setText(
+                    f"f = {self._FO_FMT.format(fo.f)} мм\no = {self._FO_FMT.format(fo.o)} мм"
+                    f"\n√(f²+o²) = {fo.resultant:.1f} мм"
+                    f"\narctg(o/f) = {fo.angle:+.1f}°"
+                    if fo else "f = —\no = —\n√(f²+o²) = —\narctg(o/f) = —")
 
     def _render_block(self, c, store: dict, blk: dict):
         """Отрисовать один блок form-описания (button/banner/text/note/fields/fixture)."""
@@ -1066,6 +1220,9 @@ class _CyclicWizard(QWidget):
             if tag is not None:
                 val = blk.get("value", 1)
                 b.clicked.connect(lambda _c=False, t=tag, v=val: tags.write(t, v))
+            # кнопка шага нагружения запускает выполнение на стенде → запись
+            # в БД и видео (гасится по "done"-статусу ПЛК или при смене шага)
+            b.clicked.connect(lambda _c=False, bl=blk: self._step_started(bl))
             row.addWidget(b, 0)
             row.addStretch()
             c.addLayout(row)
@@ -1095,6 +1252,8 @@ class _CyclicWizard(QWidget):
                 store.setdefault(key, it.get("default", ""))
                 row.addLayout(self._input(it["label"], store[key], self._form_setter(store, key)), 1)
             c.addLayout(row)
+        elif bt == "calc_fo":
+            self._render_calc_fo(c, store, blk)
         elif bt == "cards":
             # информационные плитки (значение + подпись); цвет — имя из палитры.
             # Опц. "tag"/"stream" — живой источник (tenza/displacement/setpoint/скаляр):
@@ -1791,7 +1950,8 @@ class _CyclicWizard(QWidget):
 
 
 class Section3Widget(QWidget):
-    started = pyqtSignal(bool)  # True — испытание начато, False — сброшено
+    started   = pyqtSignal(bool)  # True — испытание начато, False — сброшено
+    recording = pyqtSignal(bool)  # True — стенд нагружает (запись в БД и видео), False — нет
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1808,6 +1968,8 @@ class Section3Widget(QWidget):
 
         self._gost    = ""
         self._method  = ""
+        self._level   = ""
+        self._cond    = ""
         self._wizard  = None
         self._sample_info_provider = None   # callable → dict «инфо об образце»
         self._rebuild()
@@ -1818,6 +1980,12 @@ class Section3Widget(QWidget):
         self._sample_info_provider = fn
         if self._wizard is not None:
             self._wizard._sample_info_provider = fn
+
+    def set_load_params(self, level: str, cond: str):
+        """Уровень нагрузки / условие нагружения из секции 2 → мастеру (расчёты)."""
+        self._level, self._cond = level, cond
+        if self._wizard is not None:
+            self._wizard.set_load_params(level, cond)
 
     def set_params(self, gost: str, method: str):
         """Вызывается из Section2Widget при смене ГОСТ или методики."""
@@ -1843,7 +2011,9 @@ class Section3Widget(QWidget):
         """Построить пошаговый мастер для текущей (ГОСТ, методика)."""
         self._wizard = _CyclicWizard(self._gost, self._method, state=state)
         self._wizard._sample_info_provider = self._sample_info_provider
-        self._wizard.started.connect(self.started)   # проброс блокировки комбобоксов сек.2
+        self._wizard.set_load_params(self._level, self._cond)
+        self._wizard.started.connect(self.started)     # проброс блокировки комбобоксов сек.2
+        self._wizard.recording.connect(self.recording) # проброс фазы записи
         self._scroll.setWidget(self._wizard)
 
     def on_alarm(self):

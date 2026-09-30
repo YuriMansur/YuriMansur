@@ -333,8 +333,16 @@ async def _run_connected(client: Client, live_q, cmd_q, procs: list):
                 cmd = cmd_q.get_nowait()
                 name = cmd['cmd']                 # логическое имя тега
                 val  = cmd['val']
-                # Начало/конец испытания → запись потоков в БД. Переключаем до
-                # записи тега: даже если она не пройдёт, данные испытания важнее.
+                # Служебная команда GUI (не тег ПЛК): запись потоков в БД вкл/выкл.
+                # Мастер шлёт её при входе в нагружение и при выходе из него.
+                if name == "__record":
+                    rec = bool(val)
+                    for p in procs:
+                        p.set_recording(rec)
+                    print(f"[worker] запись в БД {'включена' if rec else 'выключена'} (мастер)")
+                    continue
+                # Страховка: команды завершения/прерывания из конфига (record.stop)
+                # гасят запись, даже если GUI не успел прислать __record.
                 if name in _REC_START or name in _REC_STOP:
                     rec = name in _REC_START
                     for p in procs:

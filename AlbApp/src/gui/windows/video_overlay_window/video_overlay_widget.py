@@ -34,7 +34,7 @@ class VideoOverlayWidget(QWidget):
 
         # ── шапка ─────────────────────────────────────────────────────────────
         title = QLabel("Видеоналожение")
-        title.setStyleSheet("font-size: 17px; font-weight: bold;")
+        title.setStyleSheet("font-size: 17px; font-weight: bold; color: #6c5ce7;")   # цвет вкладки «Видеоналожение»
         root.addWidget(title)
 
         hint = QLabel(

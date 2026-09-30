@@ -24,14 +24,19 @@
           "type": "fields",
           "items": [
             {
-              "key": "seg1",
-              "label": "Длина сегмента 1 (мм)"
+              "key": "seg_upper",
+              "label": "Длина сегмента, верхняя (мм)"
             },
             {
-              "key": "seg2",
-              "label": "Длина сегмента 2 (мм)"
+              "key": "seg_lower",
+              "label": "Длина сегмента, нижняя (мм)"
             }
           ]
+        },
+        {
+          "type": "calc_fo",
+          "upper": "seg_upper",
+          "lower": "seg_lower"
         },
         {
           "type": "text",

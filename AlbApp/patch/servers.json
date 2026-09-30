@@ -58,7 +58,7 @@
       "logging": {
         "index_tag": "cc",
         "record": {
-          "start": ["cmdExperimentRun"],
+          "start": [],
           "stop":  ["cmdExperimentEnd", "cmdExperimentAbort"]
         },
         "ring": [
